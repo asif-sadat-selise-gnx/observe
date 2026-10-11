@@ -31,6 +31,7 @@ import { NodeRuntimeMetrics } from "../interfaces/node-runtime-metrics.interface
 import { ObserveModuleOptionsWithDefaults } from "../interfaces/observe-options.interface.js";
 import { RequestSnapshot } from "../interfaces/request-snapshot.interface.js";
 import { OBSERVE_OPTIONS } from "../observe.constants.js";
+import { fallbackOperationId } from "../utils/fallback-operation-id.util.js";
 
 const SHARED_BUFFER_SIZE = 1024 * 1024 * 16; // 16 MB
 const DEFAULT_MAX_SNAPSHOTS_PER_TRANSACTION = 1000;
@@ -224,12 +225,16 @@ export class ObserveAgentSharedBuffer {
 
   insertRequestSnapshot(snapshot: RequestSnapshot) {
     // A request can end before its route metadata is ever captured - an auth
-    // guard rejecting it, or a GraphQL document that never reaches a resolver
-    // (`{ __typename }`) - leaving no operation id. The collector requires one
-    // on every snapshot and rejects the *entire batch* over a single miss, so
-    // fall back to the transport's URL, and drop the snapshot when even that
-    // is absent rather than poison the batch it would ride in.
-    snapshot.operationId ??= snapshot.attributes?.originalUrl;
+    // guard rejecting it, a CORS preflight, or a GraphQL document that never
+    // reaches a resolver (`{ __typename }`) - leaving no operation id. The
+    // collector requires one on every snapshot and rejects the *entire batch*
+    // over a single miss, so fall back to the transport's URL, and drop the
+    // snapshot when even that is absent rather than poison the batch it would
+    // ride in. The URL is folded to a route-like path first, or every query
+    // string and id would be a route of its own; `originalUrl` keeps it whole.
+    snapshot.operationId ??= fallbackOperationId(
+      snapshot.attributes?.originalUrl,
+    );
     if (!snapshot.operationId) {
       if (this.options.debug) {
         this.logger.debug(
