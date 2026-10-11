@@ -1,3 +1,4 @@
+import type { IncomingMessage } from "http";
 import type { createTelemetrySanitizer } from "./telemetry-wire-contract.js";
 import type { describeIngestRefusal } from "../utils/ingest-refusal.util.js";
 
@@ -41,6 +42,8 @@ export const detachedObserveWorker = (
   /* eslint-disable @typescript-eslint/no-require-imports */
   const { parentPort, workerData } = require("worker_threads");
   const zlib = require("zlib");
+  const http = require("http");
+  const https = require("https");
   /* eslint-enable @typescript-eslint/no-require-imports */
 
   // `workerData` carries the shared buffer plus the collector config: the
@@ -57,8 +60,8 @@ export const detachedObserveWorker = (
 
   /**
    * Why the endpoint can never be reached, decided once from its shape; null
-   * when it parses. `fetch` reports a malformed URL exactly as it reports a
-   * refused connection - a `TypeError` with a `cause` - so without this the
+   * when it parses. A malformed URL otherwise fails the request exactly as a
+   * refused connection does - an error with a `cause` - so without this the
    * operator is told to check that the collector is running when the fix is
    * the `endpoint` option. `new URL` alone does not settle it: a scheme-less
    * "localhost:4000" parses, with "localhost" as the scheme.
@@ -158,7 +161,7 @@ export const detachedObserveWorker = (
    * on rate limits and mis-parsing it risks an enormous pause - and anything
    * absent, malformed, or out of range falls back to the default.
    */
-  const rateLimitPauseMs = (response: { headers: Headers }) => {
+  const rateLimitPauseMs = (response: CollectorResponse) => {
     const retryAfter = Number(response.headers.get("retry-after"));
     if (Number.isFinite(retryAfter) && retryAfter > 0) {
       return Math.min(retryAfter * 1000, RATE_LIMIT_PAUSE_MAX_MS);
@@ -223,9 +226,138 @@ export const detachedObserveWorker = (
       }),
     );
 
-  /** The request and nothing else, so what it throws is a transport failure. */
-  const post = (body: Buffer) =>
-    fetch(telemetryUrl, { method: "POST", headers, body });
+  /**
+   * How long a connection to the collector stays open between batches.
+   *
+   * Batches used to go through `fetch`, whose undici agent drops a socket
+   * after 4 s idle - one second short of the default 5 s flush - so every
+   * batch paid a new TCP connection and TLS handshake, the collector's
+   * certificate chain included. At the hosted collector's load balancer on
+   * 2026-10-08 that was 5.8-6.9M new connections a day for 4.5M requests,
+   * and ~27 GB/day sent to agents of which response bodies were 4.4 GB.
+   *
+   * Thirty seconds outlasts the default flush and any `flushInterval` below
+   * it, and stays inside common load-balancer idle timeouts (an ALB defaults
+   * to 60 s), so the agent lets go of an idle connection before the server
+   * does. A server announcing a shorter `Keep-Alive: timeout` is obeyed: the
+   * Node agent closes one second before it. An idle socket is unref'd and
+   * never holds the process open.
+   */
+  const KEEP_ALIVE_IDLE_MS = 30_000;
+
+  // Chosen once: the endpoint cannot change, and a malformed one never gets
+  // as far as a request (see `post`).
+  const transport =
+    !endpointProblem && new URL(telemetryUrl).protocol === "https:"
+      ? https
+      : http;
+  const agent = new transport.Agent({
+    keepAlive: true,
+    timeout: KEEP_ALIVE_IDLE_MS,
+  });
+
+  /** What the code below reads from a collector reply. */
+  interface CollectorResponse {
+    ok: boolean;
+    status: number;
+    statusText: string;
+    headers: { get(name: string): string | null };
+    text(): Promise<string>;
+    json(): Promise<unknown>;
+  }
+
+  /**
+   * One POST, with the reply read to the end before it resolves.
+   *
+   * Read whatever the status: a reply left unread keeps its socket busy, and
+   * the next batch opens another connection - the 401/403 path never read
+   * its body under `fetch`. Collector replies are a few hundred bytes.
+   *
+   * A transport failure rejects with the failure as `cause`, the shape the
+   * reporting below reads (ECONNREFUSED and friends on `err.cause.code`), and
+   * says whether the socket was a kept-alive one.
+   */
+  const request = (body: Buffer) =>
+    new Promise<CollectorResponse>((resolve, reject) => {
+      const req = transport.request(
+        telemetryUrl,
+        {
+          method: "POST",
+          agent,
+          headers: { ...headers, "Content-Length": body.length },
+        },
+        (res: IncomingMessage) => {
+          const chunks: Buffer[] = [];
+          res.on("data", (chunk: Buffer) => chunks.push(chunk));
+          res.on("error", (err: Error) =>
+            reject(new Error("collector reply failed", { cause: err })),
+          );
+          res.on("end", () => {
+            const text = Buffer.concat(chunks).toString("utf8");
+            const status = res.statusCode ?? 0;
+            resolve({
+              ok: status >= 200 && status < 300,
+              status,
+              statusText: res.statusMessage ?? "",
+              headers: {
+                get: (name) => {
+                  const value = res.headers[name.toLowerCase()];
+                  if (value === undefined) {
+                    return null;
+                  }
+                  return Array.isArray(value) ? value.join(", ") : value;
+                },
+              },
+              text: async () => text,
+              json: async () => JSON.parse(text),
+            });
+          });
+        },
+      );
+      req.on("error", (err: Error) =>
+        reject(
+          Object.assign(
+            new Error("request to the collector failed", { cause: err }),
+            {
+              reusedSocket: req.reusedSocket,
+            },
+          ),
+        ),
+      );
+      req.end(body);
+    });
+
+  /**
+   * The request and nothing else, so what it throws is a transport failure.
+   *
+   * Sent once more, on a fresh socket, when a kept-alive socket was reset
+   * before any reply: the server closed it while it sat idle and never read
+   * the batch (ECONNRESET, or EPIPE when the reset landed before the write).
+   * That is the race every keep-alive client has - Node documents this retry
+   * on `request.reusedSocket`, and undici makes it for `fetch` on idempotent
+   * requests - and without it a batch would be dropped and reported as an
+   * unreachable collector.
+   */
+  const post = async (body: Buffer): Promise<CollectorResponse> => {
+    if (endpointProblem) {
+      throw new Error("the collector endpoint is not a valid http(s) URL", {
+        cause: new Error(endpointProblem),
+      });
+    }
+    try {
+      return await request(body);
+    } catch (err) {
+      const failure = err as {
+        reusedSocket?: boolean;
+        cause?: { code?: string };
+      };
+      const code = failure.cause?.code;
+      if (failure.reusedSocket && (code === "ECONNRESET" || code === "EPIPE")) {
+        return request(body);
+      }
+      throw err;
+    }
+  };
 
   const postBatch = async (json: string) => post(await gzipAsync(json));
 
@@ -323,17 +455,17 @@ export const detachedObserveWorker = (
       // Only the request is in this `try`, so anything it throws is a
       // transport failure by construction and the outer catch is left for
       // faults in this worker. Telling the two apart by the shape of the error
-      // instead - `fetch` puts ECONNREFUSED and friends on `err.cause` - holds
-      // only until the first exception without one, such as a timeout signal
-      // on the request, which would then be reported as an agent bug.
-      let response: Awaited<ReturnType<typeof fetch>>;
+      // instead - `post` puts ECONNREFUSED and friends on `err.cause` - holds
+      // only until the first exception without one, such as a timeout on the
+      // request, which would then be reported as an agent bug.
+      let response: CollectorResponse;
       try {
         response = await post(compressed);
       } catch (err) {
-        // `fetch` reports every transport failure as the same opaque "fetch
-        // failed" and puts the reason - ECONNREFUSED, ENOTFOUND, a TLS error -
-        // on `err.cause`. Reporting only `err.message` would tell the operator
-        // nothing: not what went wrong, and not which URL was tried.
+        // `post` reports every transport failure the same opaque way and puts
+        // the reason - ECONNREFUSED, ENOTFOUND, a TLS error - on `err.cause`.
+        // Reporting only `err.message` would tell the operator nothing: not
+        // what went wrong, and not which URL was tried.
         const cause = (err as { cause?: { code?: string; message?: string } })
           ?.cause;
         const reason = cause?.code ?? cause?.message;
