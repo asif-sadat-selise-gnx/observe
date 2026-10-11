@@ -133,6 +133,55 @@ describe("HttpObserveAgentService", () => {
     });
   });
 
+  describe("CORS preflights", () => {
+    const preflight = (
+      service: HttpObserveAgentService<any>,
+      headers: Record<string, string> = {
+        origin: "https://app.example.com",
+        "access-control-request-method": "GET",
+      },
+    ) => {
+      let released = false;
+      service.startHttpRequestTracing(
+        {
+          url: "/items/7?view=full",
+          method: "OPTIONS",
+          protocol: "http",
+          headers,
+        },
+        {},
+        () => {
+          released = true;
+        },
+      );
+      return released;
+    };
+
+    it("lets a preflight through untraced by default", () => {
+      const service = createService();
+
+      expect(preflight(service)).toBe(true);
+      expect(startedTraces).toHaveLength(0);
+    });
+
+    it("traces a preflight when tracePreflights is on", () => {
+      const service = createService({ tracePreflights: true });
+
+      preflight(service);
+
+      expect(startedTraces).toHaveLength(1);
+    });
+
+    it("traces an OPTIONS request that is not a preflight", () => {
+      // The application's own OPTIONS handler: no Access-Control-Request-Method.
+      const service = createService();
+
+      preflight(service, { origin: "https://app.example.com" });
+
+      expect(startedTraces).toHaveLength(1);
+    });
+  });
+
   describe("a trace id two open requests share", () => {
     it("keys the first request by its trace id, and the second by a key of its own, both reporting under the id", () => {
       // The generator stands in for an adopted `x-request-id`: a caller that

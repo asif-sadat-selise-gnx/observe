@@ -37,6 +37,14 @@ const REQUEST_HOOKS = [
   "setOnRouteTriggered",
 ] as const;
 
+/** What the request hook reads of an Express or Fastify request. */
+interface IncomingHttpRequest {
+  url: string;
+  method: string;
+  protocol: string;
+  headers?: Record<string, string | string[] | undefined>;
+}
+
 @Injectable()
 export class HttpObserveAgentService<Store extends Record<string, unknown>>
   implements OnModuleInit, OnModuleDestroy
@@ -116,11 +124,7 @@ export class HttpObserveAgentService<Store extends Record<string, unknown>>
     }
 
     httpAdapter.setOnRequestHook(
-      (
-        req: { url: string; method: string; protocol: string },
-        res: unknown,
-        done: () => void,
-      ) => {
+      (req: IncomingHttpRequest, res: unknown, done: () => void) => {
         this.startHttpRequestTracing(req, res, done);
       },
     );
@@ -138,7 +142,7 @@ export class HttpObserveAgentService<Store extends Record<string, unknown>>
   }
 
   startHttpRequestTracing(
-    req: { url: string; method: string; protocol: string },
+    req: IncomingHttpRequest,
     res: unknown,
     done: () => void,
   ) {
@@ -158,7 +162,7 @@ export class HttpObserveAgentService<Store extends Record<string, unknown>>
         }
       }
 
-      if (this.shouldIgnoreRequest(req)) {
+      if (this.shouldIgnoreRequest(req) || this.isUntracedPreflight(req)) {
         return done();
       }
 
@@ -311,6 +315,22 @@ export class HttpObserveAgentService<Store extends Record<string, unknown>>
       );
     }
     return false;
+  }
+
+  /**
+   * A CORS preflight, when `http.tracePreflights` has not asked for them.
+   *
+   * Recognised by what the CORS spec defines a preflight to be - `OPTIONS`
+   * with an `Access-Control-Request-Method` header - rather than by the
+   * method alone, so an application's own `OPTIONS` handler is still traced.
+   * Both adapters lower-case header names.
+   */
+  private isUntracedPreflight(req: IncomingHttpRequest): boolean {
+    return (
+      !this.options.http?.tracePreflights &&
+      req.method === "OPTIONS" &&
+      req.headers?.["access-control-request-method"] !== undefined
+    );
   }
 
   private shouldIgnoreRequest(req: { url: string; method: string }): boolean {
