@@ -123,7 +123,7 @@ export function createInstanceDecorator<T extends Record<string, unknown>>(
         );
         return res;
       };
-      const onError = (err: any) => {
+      const recordError = (err: any) => {
         // Before the registry records the step: `internalEndTraceStep` copies
         // `err.stack` into the span payload (and, on a root span, into the
         // snapshot that becomes the error group's sample), so relabelling
@@ -137,6 +137,9 @@ export function createInstanceDecorator<T extends Record<string, unknown>>(
           newStepId,
           err,
         );
+      };
+      const onError = (err: any) => {
+        recordError(err);
         // Re-throw the error to maintain original behavior
         throw err;
       };
@@ -149,34 +152,32 @@ export function createInstanceDecorator<T extends Record<string, unknown>>(
           try {
             const result = call(this, args);
             if (result instanceof Promise) {
-              // Watch the promise on a side branch and hand it back untouched.
-              // A `.then().catch()` chain would return a new promise, and the
-              // caller would lose every member the original carries (`json()`
-              // on a `got` request, `cancel()` on a cancelable promise) and
-              // the object identity and the own members of a Promise subclass.
-              // The caller's chain must see the same value and the same
-              // rejection as without the span. `onError` re-throws by design,
-              // so both handlers swallow here: a throw on the side branch
-              // would surface as an unhandled rejection the caller never
-              // caused. The side branch also marks the promise as handled, as
-              // `OutgoingSpanRecorder.endWhenSettled` does.
-              result.then(
-                (value) => {
-                  try {
-                    onReturnValue(value);
-                  } catch {
-                    // The span is a side effect; a failure here must not reach
-                    // the caller.
-                  }
-                },
-                (err) => {
-                  try {
-                    onError(err);
-                  } catch {
-                    // `onError` re-throws the rejection the caller already
-                    // sees; a failure here must not reach the caller either.
-                  }
-                },
+              // Closing the span is a side effect: a registry failure must
+              // leave the caller with the value or rejection it would have
+              // seen without the span.
+              const settled = (value: unknown) => {
+                ignoreFailure(() => onReturnValue(value));
+                return value;
+              };
+              const failed = (err: unknown) => {
+                ignoreFailure(() => recordError(err));
+                throw err;
+              };
+              // A plain native promise is swapped for a chained one, just as
+              // the caller's own `.then` would: a rejection the caller drops
+              // still raises `unhandledRejection`, as without the span.
+              if (isPlainPromise(result)) {
+                return result.then(settled, failed);
+              }
+              // A promise carrying more than its value (`json()` on a `got`
+              // request, `kill()` on an `execa` child, a subclass and its own
+              // members) is handed back as-is, or the caller loses all that.
+              // It is watched on a side branch instead, the way
+              // `OutgoingSpanRecorder.endWhenSettled` watches outgoing calls.
+              // Watching marks it handled, so a rejection the caller drops no
+              // longer raises `unhandledRejection`; the span still records it.
+              result.then(settled, (err) =>
+                ignoreFailure(() => recordError(err)),
               );
               return result;
             }
@@ -384,6 +385,27 @@ export function createInstanceDecorator<T extends Record<string, unknown>>(
     }
     return instance;
   };
+}
+
+/**
+ * Whether a promise is a bare native one: no subclass, no members of its own.
+ * Such a promise carries nothing but its value, so a chained promise can stand
+ * in for it without the caller noticing.
+ */
+function isPlainPromise(promise: Promise<unknown>): boolean {
+  return (
+    Object.getPrototypeOf(promise) === Promise.prototype &&
+    Reflect.ownKeys(promise).length === 0
+  );
+}
+
+/** Runs span bookkeeping whose failure must not reach the caller. */
+function ignoreFailure(fn: () => unknown): void {
+  try {
+    fn();
+  } catch {
+    // The span is a side effect of the call, not part of its outcome.
+  }
 }
 
 /**

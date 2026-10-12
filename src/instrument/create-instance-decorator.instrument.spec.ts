@@ -254,73 +254,143 @@ describe("createInstanceDecorator", () => {
         }
       }
 
+      /** A promise in the style of a `got` request or a cancelable one. */
+      const withMembers = <T>(promise: Promise<T>) =>
+        Object.assign(promise, { cancel: () => undefined });
+
+      /**
+       * Collects the `unhandledRejection` events `fn` raises. Vitest's own
+       * listener fails the run on any of them, so it is set aside meanwhile.
+       */
+      const captureUnhandledRejections = async (fn: () => Promise<void>) => {
+        const reasons: unknown[] = [];
+        const listener = (reason: unknown) => reasons.push(reason);
+        const previous = process.listeners("unhandledRejection");
+        process.removeAllListeners("unhandledRejection");
+        process.on("unhandledRejection", listener);
+        try {
+          await fn();
+        } finally {
+          process.off("unhandledRejection", listener);
+          for (const handler of previous) {
+            process.on("unhandledRejection", handler);
+          }
+        }
+        return reasons;
+      };
+
+      it("chains a plain promise, as the caller's own `.then` would", async () => {
+        const original = Promise.resolve("p");
+        const service = decorate(new PromiseService()) as PromiseService;
+
+        const returned = withTrace(() => service.withMember(original));
+
+        expect(returned).not.toBe(original);
+        await expect(returned).resolves.toBe("p");
+        expect(endedSteps).toEqual([{ spanId: "PromiseService#withMember" }]);
+      });
+
+      it("lets a dropped rejection of a plain promise raise unhandledRejection", async () => {
+        const failure = new Error("dropped");
+        const service = decorate(new PromiseService()) as PromiseService;
+
+        const unhandled = await captureUnhandledRejections(async () => {
+          void withTrace(() => service.withMember(Promise.reject(failure)));
+          await settle();
+        });
+
+        expect(unhandled).toEqual([failure]);
+        expect(endedSteps[0].error).toBe(failure);
+      });
+
       it("returns the very promise the method returned, members included", async () => {
-        const cancel = () => undefined;
-        const original = Object.assign(Promise.resolve("p"), { cancel });
+        const original = withMembers(Promise.resolve("p"));
         const service = decorate(new PromiseService()) as PromiseService;
 
         const returned = withTrace(() => service.withMember(original));
 
         expect(returned).toBe(original);
-        expect(returned.cancel).toBe(cancel);
+        expect(returned.cancel).toBe(original.cancel);
         await expect(returned).resolves.toBe("p");
         await settle();
         expect(endedSteps).toEqual([{ spanId: "PromiseService#withMember" }]);
       });
 
-      it("hands the caller the original rejection and records it on the span", async () => {
-        const failure = new Error("rejected");
+      it("records a dropped rejection of a promise with members on the span only", async () => {
+        // Watching a promise marks it handled, so this one no longer reaches
+        // `unhandledRejection`. Only promises that cannot be swapped pay that.
+        const failure = new Error("dropped");
         const service = decorate(new PromiseService()) as PromiseService;
-        const returned = withTrace(() =>
-          service.withMember(Promise.reject(failure)),
-        );
 
-        await expect(returned).rejects.toBe(failure);
-        await settle();
+        const unhandled = await captureUnhandledRejections(async () => {
+          void withTrace(() =>
+            service.withMember(withMembers(Promise.reject(failure))),
+          );
+          await settle();
+        });
 
-        expect(endedSteps).toHaveLength(1);
+        expect(unhandled).toEqual([]);
         expect(endedSteps[0].error).toBe(failure);
       });
 
-      it("ends the span when the promise settles, not when it is returned", async () => {
-        let resolveLater!: (value: string) => void;
-        const pending = new Promise<string>((resolve) => {
-          resolveLater = resolve;
+      describe.each([
+        ["a plain promise", <T>(promise: Promise<T>) => promise],
+        ["a promise with members", withMembers],
+      ])("for %s", (_label, shape) => {
+        it("hands the caller the original rejection and records it on the span", async () => {
+          const failure = new Error("rejected");
+          const service = decorate(new PromiseService()) as PromiseService;
+          const returned = withTrace(() =>
+            service.withMember(shape(Promise.reject(failure))),
+          );
+
+          await expect(returned).rejects.toBe(failure);
+          await settle();
+
+          expect(endedSteps).toHaveLength(1);
+          expect(endedSteps[0].error).toBe(failure);
         });
-        const service = decorate(new PromiseService()) as PromiseService;
 
-        void withTrace(() => service.withMember(pending));
-        await settle();
-        expect(endedSteps).toEqual([]);
+        it("ends the span when the promise settles, not when it is returned", async () => {
+          let resolveLater!: (value: string) => void;
+          const pending = new Promise<string>((resolve) => {
+            resolveLater = resolve;
+          });
+          const service = decorate(new PromiseService()) as PromiseService;
 
-        resolveLater("done");
-        await settle();
-        expect(endedSteps).toHaveLength(1);
-      });
+          void withTrace(() => service.withMember(shape(pending)));
+          await settle();
+          expect(endedSteps).toEqual([]);
 
-      it("keeps the caller's value when closing the span throws", async () => {
-        endFailure = new Error("registry failed");
-        const service = decorate(new PromiseService()) as PromiseService;
+          resolveLater("done");
+          await settle();
+          expect(endedSteps).toHaveLength(1);
+        });
 
-        const returned = withTrace(() =>
-          service.withMember(Promise.resolve("p")),
-        );
+        it("keeps the caller's value when closing the span throws", async () => {
+          endFailure = new Error("registry failed");
+          const service = decorate(new PromiseService()) as PromiseService;
 
-        await expect(returned).resolves.toBe("p");
-        await settle();
-      });
+          const returned = withTrace(() =>
+            service.withMember(shape(Promise.resolve("p"))),
+          );
 
-      it("keeps the caller's rejection when closing the span throws", async () => {
-        endFailure = new Error("registry failed");
-        const failure = new Error("rejected");
-        const service = decorate(new PromiseService()) as PromiseService;
+          await expect(returned).resolves.toBe("p");
+          await settle();
+        });
 
-        const returned = withTrace(() =>
-          service.withMember(Promise.reject(failure)),
-        );
+        it("keeps the caller's rejection when closing the span throws", async () => {
+          endFailure = new Error("registry failed");
+          const failure = new Error("rejected");
+          const service = decorate(new PromiseService()) as PromiseService;
 
-        await expect(returned).rejects.toBe(failure);
-        await settle();
+          const returned = withTrace(() =>
+            service.withMember(shape(Promise.reject(failure))),
+          );
+
+          await expect(returned).rejects.toBe(failure);
+          await settle();
+        });
       });
 
       it("builds only one derived promise from a Promise subclass", () => {
