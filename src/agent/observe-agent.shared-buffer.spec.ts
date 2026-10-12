@@ -219,18 +219,33 @@ describe("ObserveAgentSharedBuffer", () => {
       (batchOf(buffer) as { snapshots?: Array<{ op?: string; ou?: string }> })
         ?.snapshots;
 
+    const PROJECT = "b0c013f1-5ebc-444f-8f40-6c0ea68150e9";
+    const PREFLIGHT_URL = `/me/projects/${PROJECT}/telemetry/dashboard?timeInterval=30d`;
+
     it("keeps the operation id when one was captured", () => {
       const buffer = createBuffer();
 
+      // Matched routes are never folded, even one spelled with a `?` - an
+      // Express optional parameter - which a fallback would be cut at.
       buffer.insertRequestSnapshot(
         requestSnapshot({
-          operationId: "/users/:id",
+          operationId: "/me/projects/:projectId/telemetry/dashboard",
+          attributes: { originalUrl: PREFLIGHT_URL },
+        }),
+      );
+      buffer.insertRequestSnapshot(
+        requestSnapshot({
+          traceId: "trace-2",
+          operationId: "/users/:id?",
           attributes: { originalUrl: "/users/42" },
         }),
       );
 
       expect(snapshotsOf(buffer)).toEqual([
-        expect.objectContaining({ op: "/users/:id" }),
+        expect.objectContaining({
+          op: "/me/projects/:projectId/telemetry/dashboard",
+        }),
+        expect.objectContaining({ op: "/users/:id?" }),
       ]);
     });
 
@@ -245,6 +260,45 @@ describe("ObserveAgentSharedBuffer", () => {
 
       expect(snapshotsOf(buffer)).toEqual([
         expect.objectContaining({ op: "/graphql" }),
+      ]);
+    });
+
+    it("folds a fallback URL to its path, ids replaced", () => {
+      const buffer = createBuffer();
+
+      // A CORS preflight is answered by the cors middleware before any route
+      // matches. Sent verbatim, each project id and query string would be a
+      // route of its own in every per-route rollup.
+      buffer.insertRequestSnapshot(
+        requestSnapshot({
+          attributes: { method: "OPTIONS", originalUrl: PREFLIGHT_URL },
+        }),
+      );
+
+      // Only the grouping key is folded: the URL itself still travels whole.
+      expect(snapshotsOf(buffer)).toEqual([
+        expect.objectContaining({
+          op: "/me/projects/:id/telemetry/dashboard",
+          a: expect.objectContaining({ ou: PREFLIGHT_URL }),
+        }),
+      ]);
+    });
+
+    it("keeps a GraphQL document fallback as it is", () => {
+      const buffer = createBuffer();
+      const document = 'query { search(q: "why?") { id } }';
+
+      // The document is not a path, and the `?` in its string literal is not
+      // a query string to cut at.
+      buffer.insertRequestSnapshot(
+        requestSnapshot({
+          protocol: "graphql",
+          attributes: { originalUrl: document },
+        }),
+      );
+
+      expect(snapshotsOf(buffer)).toEqual([
+        expect.objectContaining({ op: document }),
       ]);
     });
 

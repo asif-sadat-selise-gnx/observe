@@ -428,6 +428,20 @@ export interface ObserveOptions {
       | Array<string | { method: string; path: string | RegExp } | RegExp>
       | ((req: any) => boolean);
     /**
+     * Whether to trace CORS preflight requests - the `OPTIONS` request,
+     * carrying an `Access-Control-Request-Method` header, that a browser
+     * sends ahead of a cross-origin call.
+     *
+     * Off by default. A preflight is answered by the CORS middleware before
+     * any route matches, so it has no route to be grouped under. Whenever
+     * middleware registered ahead of CORS (helmet, compression) records a
+     * span for it, it is reported under its URL instead - one "route" per
+     * distinct URL, ids included, for every call a browser client makes. An
+     * `OPTIONS` request without that header is traced either way.
+     * @default false
+     */
+    tracePreflights?: boolean;
+    /**
      * Tags to be added to all HTTP requests.
      * These tags can be used to provide additional context for the requests.
      * @example { 'environment': 'production', 'version': '1.0.0' }
