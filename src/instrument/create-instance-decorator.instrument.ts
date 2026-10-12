@@ -391,11 +391,15 @@ export function createInstanceDecorator<T extends Record<string, unknown>>(
  * Whether a promise is a bare native one: no subclass, no members of its own.
  * Such a promise carries nothing but its value, so a chained promise can stand
  * in for it without the caller noticing.
+ *
+ * Symbol keys do not count: before Node 24, `AsyncLocalStorage` stamps its
+ * own (`async_id_symbol`, `kResourceStore`, ...) on every promise created in
+ * a context, which every traced call runs in.
  */
 function isPlainPromise(promise: Promise<unknown>): boolean {
   return (
     Object.getPrototypeOf(promise) === Promise.prototype &&
-    Reflect.ownKeys(promise).length === 0
+    Object.getOwnPropertyNames(promise).length === 0
   );
 }
 
