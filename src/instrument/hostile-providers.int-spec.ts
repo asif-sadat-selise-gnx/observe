@@ -1,4 +1,4 @@
-import { Controller, Get, Inject, Module } from "@nestjs/common";
+import { Controller, Get, Inject, Injectable, Module } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
 import { NestExpressApplication } from "@nestjs/platform-express";
 import { ClsModule, ClsService } from "nestjs-cls";
@@ -109,5 +109,52 @@ describe("ObserveModule: a module namespace registered as a value provider", () 
     await request(app.getHttpServer())
       .get("/greet")
       .expect(200, { message: "hello you" });
+  });
+});
+
+/** A request object in the style of `got`: a promise that also has methods. */
+@Injectable()
+class HttpClientLikeProvider {
+  get() {
+    return Object.assign(Promise.resolve("raw"), {
+      json: async () => ({ ok: true }),
+    });
+  }
+}
+
+@Controller()
+class UpstreamController {
+  constructor(private readonly client: HttpClientLikeProvider) {}
+
+  @Get("upstream")
+  upstream() {
+    return this.client.get().json();
+  }
+}
+
+@Module({
+  imports: [ObserveModule.forRoot(testObserveOptions())],
+  controllers: [UpstreamController],
+  providers: [HttpClientLikeProvider],
+})
+class PromiseMembersTestModule {}
+
+describe("ObserveModule: a provider that returns a promise with extra members", () => {
+  let app: NestExpressApplication;
+
+  afterAll(async () => {
+    await app?.close();
+  });
+
+  it("lets the caller use the members of the returned promise", async () => {
+    app = await NestFactory.create<NestExpressApplication>(
+      PromiseMembersTestModule,
+      { instrument: ObserveInstrument, logger: false },
+    );
+    await app.init();
+
+    await request(app.getHttpServer()).get("/upstream").expect(200, {
+      ok: true,
+    });
   });
 });
