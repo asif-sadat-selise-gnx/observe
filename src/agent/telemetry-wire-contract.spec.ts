@@ -3,6 +3,7 @@ import {
   sanitizeTelemetryBatch,
   sanitizeTelemetryEntry,
   SECTION_SHAPES,
+  validateTelemetryPayload,
 } from "./telemetry-wire-contract.js";
 
 /**
@@ -19,6 +20,7 @@ describe("sanitizeTelemetryEntry", () => {
       ti: "trace-1",
       op: "/users/:id",
       d: 12.5,
+      t: [],
       ...overrides,
     });
 
@@ -51,6 +53,22 @@ describe("sanitizeTelemetryEntry", () => {
 
       expect(result.ok).toBe(false);
       expect(result.problems).toEqual(["snapshots.ti: required"]);
+    });
+
+    it("sends a missing trace array empty rather than losing the snapshot", () => {
+      // What agents 0.2.1 to 0.3.9 sent for every request whose spans they
+      // withheld from a degraded account. The API refuses an operation without
+      // the array, and its batch with it - and with nothing to strip, the
+      // batch used to be dropped unrepaired.
+      const entry = snapshot({ t: undefined });
+
+      const result = sanitizeTelemetryEntry("snapshots", entry);
+
+      expect(result).toEqual({
+        ok: true,
+        problems: ["snapshots.t: required, sent as []"],
+      });
+      expect(entry.t).toEqual([]);
     });
 
     it("removes a mistyped optional field rather than the entry", () => {
@@ -268,7 +286,7 @@ describe("sanitizeTelemetryEntry", () => {
     it("removes unusable runtime metrics without touching the rest", () => {
       const payload: Record<string, unknown> = {
         serviceId: "svc",
-        snapshots: [{ ti: "t-1", op: "/users" }],
+        snapshots: [{ ti: "t-1", op: "/users", t: [] }],
         runtime: "corrupt",
       };
 
@@ -284,13 +302,39 @@ describe("sanitizeTelemetryEntry", () => {
       // fault - nothing to repair, so nothing to re-send.
       const payload: Record<string, unknown> = {
         serviceId: "svc",
-        snapshots: [{ ti: "t-1", op: "/users", d: 3 }],
+        snapshots: [{ ti: "t-1", op: "/users", d: 3, t: [] }],
         logs: [{ timestamp: 1, text: "hello" }],
       };
 
       const result = sanitizeTelemetryBatch(payload);
 
       expect(result).toEqual({ changed: false, dropped: 0, problems: [] });
+    });
+
+    it("repairs a degraded batch whose operations lost their trace arrays", () => {
+      // The batch nestjs/observe#14 was reported over, refused with
+      // `jobs.0.t must be an array`: every operation is kept, and it then
+      // passes the contract `truncatedSpans` and all.
+      const payload: Record<string, unknown> = {
+        serviceId: "svc",
+        truncatedSpans: 4,
+        snapshots: [{ ti: "t-1", op: "/users", d: 3 }],
+        jobs: [{ i: "job-1", ti: "t-2", d: 10 }],
+      };
+
+      const result = sanitizeTelemetryBatch(payload);
+
+      expect(result).toEqual({
+        changed: true,
+        dropped: 0,
+        problems: [
+          "snapshots.t: required, sent as []",
+          "jobs.t: required, sent as []",
+        ],
+      });
+      expect(
+        validateTelemetryPayload(payload, { forbidUnknown: true }),
+      ).toEqual([]);
     });
   });
 
@@ -310,6 +354,8 @@ describe("sanitizeTelemetryEntry", () => {
 
       expect(result.ok).toBe(true);
       expect(entry).not.toHaveProperty("st");
+      // The fallback travels with the shapes, so it has to survive that trip.
+      expect(entry.t).toEqual([]);
     });
   });
 });

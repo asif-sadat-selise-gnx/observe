@@ -342,6 +342,17 @@ describe("RequestSnapshotEncoder", () => {
     expect(errors).toEqual([]);
   });
 
+  it("sends a trace array even for a snapshot with no spans", () => {
+    // The API refuses an operation without `t`, and the whole batch with it:
+    // empty is the only way to say "no spans".
+    const encoded = RequestSnapshotEncoder.encode({
+      ...(snapshot as object),
+      traces: undefined,
+    } as never);
+
+    expect(encoded.t).toEqual([]);
+  });
+
   it("relies on the registry having stripped startTimestamp", () => {
     // `startTimestamp` is mapped (to `st`), so the encoder will happily ship it.
     // What keeps it off the wire is `OperationTraceRegistry.endTrace` deleting
@@ -614,6 +625,15 @@ describe("JobSnapshotEncoder", () => {
 
     expect(errors).toEqual([]);
   });
+
+  it("sends a trace array even for a job with no spans", () => {
+    const encoded = JobSnapshotEncoder.encode({
+      ...(jobSnapshot as object),
+      traces: undefined,
+    } as never);
+
+    expect(encoded.t).toEqual([]);
+  });
 });
 
 describe("RuntimeMetricsEncoder", () => {
@@ -801,7 +821,10 @@ describe("RuntimeMetricsEncoder", () => {
  * every one of them pass.
  */
 describe("telemetry wire contract", () => {
-  const valid = { serviceId: "svc", snapshots: [{ ti: "trace-1", d: 1 }] };
+  const valid = {
+    serviceId: "svc",
+    snapshots: [{ ti: "trace-1", d: 1, t: [] }],
+  };
 
   it("accepts a well-formed batch", () => {
     expect(validateTelemetryPayload(valid)).toEqual([]);
@@ -811,6 +834,18 @@ describe("telemetry wire contract", () => {
     expect(validateTelemetryPayload({ snapshots: [] })).toEqual([
       "serviceId: required",
     ]);
+  });
+
+  it("reports an operation without its trace array", () => {
+    // Required by the API even when there are no spans. Agents that deleted
+    // it instead had every degraded batch refused.
+    expect(
+      validateTelemetryPayload({
+        serviceId: "svc",
+        snapshots: [{ ti: "trace-1" }],
+        jobs: [{ i: "job-1" }],
+      }),
+    ).toEqual(["snapshots[0].t: required", "jobs[0].t: required"]);
   });
 
   it("reports a field of the wrong type", () => {
@@ -823,7 +858,7 @@ describe("telemetry wire contract", () => {
     expect(
       validateTelemetryPayload({
         serviceId: "svc",
-        snapshots: [{ ti: "trace-1", a: { sc: "200" } }],
+        snapshots: [{ ti: "trace-1", t: [], a: { sc: "200" } }],
       }),
     ).toEqual(["snapshots[0].a.sc: expected a number, got string"]);
   });
@@ -849,7 +884,7 @@ describe("telemetry wire contract", () => {
     // rejects - only the pipe configured with `forbidNonWhitelisted` refuses.
     const payload = {
       serviceId: "svc",
-      snapshots: [{ ti: "trace-1", zz: 1 }],
+      snapshots: [{ ti: "trace-1", t: [], zz: 1 }],
     };
 
     expect(validateTelemetryPayload(payload)).toEqual([]);

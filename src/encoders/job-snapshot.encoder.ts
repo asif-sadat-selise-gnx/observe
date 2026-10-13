@@ -21,7 +21,8 @@ const SNAPSHOT_KEY_MAP = {
   error: "e",
 } as const satisfies Record<keyof JobSnapshot, string>;
 
-// `t` holds encoded spans, so its type is replaced rather than intersected.
+// `t` holds encoded spans, so its type is replaced rather than intersected -
+// and never optional, for the same reason as a request's.
 export type EncodedJobSnapshot = Omit<
   {
     [K in keyof JobSnapshot as K extends keyof typeof SNAPSHOT_KEY_MAP
@@ -30,7 +31,7 @@ export type EncodedJobSnapshot = Omit<
   },
   "t"
 > & {
-  t?: Array<RecursiveEncodedTrace>;
+  t: Array<RecursiveEncodedTrace>;
 };
 
 export class JobSnapshotEncoder {
@@ -39,11 +40,9 @@ export class JobSnapshotEncoder {
       snapshot,
       SNAPSHOT_KEY_MAP,
     );
-    if (snapshot.traces) {
-      encoded.t = snapshot.traces.map((trace) =>
-        encodeTrace(trace as CompleteTraceEventNode),
-      );
-    }
+    encoded.t = (snapshot.traces ?? []).map((trace) =>
+      encodeTrace(trace as CompleteTraceEventNode),
+    );
     return encoded;
   }
 }

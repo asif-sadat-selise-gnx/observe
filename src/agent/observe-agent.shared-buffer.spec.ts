@@ -119,11 +119,14 @@ describe("ObserveAgentSharedBuffer", () => {
     };
 
     const expectTraceArrays = (batch: SerializedBatch) => {
-      // The local contract accepts an absent `t`, so validation alone cannot
-      // catch an operation whose trace array was lost during serialization.
       for (const entry of [...batch.snapshots, ...batch.jobs]) {
         expect(Array.isArray(entry.t)).toBe(true);
       }
+      // The contract requires `t` as the collector does, so the batch as a
+      // whole has to pass it too - `truncatedSpans` included.
+      expect(validateTelemetryPayload(batch, { forbidUnknown: true })).toEqual(
+        [],
+      );
     };
 
     afterEach(() => {
@@ -304,12 +307,7 @@ describe("ObserveAgentSharedBuffer", () => {
       expectTraceArrays(batch);
       expect(batch.snapshots[0].t).toEqual([]);
       expect(batch.jobs[0].t).toEqual([]);
-      // `truncatedSpans` is not declared by the local batch contract.
-      const { truncatedSpans, ...contractBatch } = batch;
-      expect(truncatedSpans).toBe(4);
-      expect(
-        validateTelemetryPayload(contractBatch, { forbidUnknown: true }),
-      ).toEqual([]);
+      expect(batch.truncatedSpans).toBe(4);
     });
   });
 

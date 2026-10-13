@@ -41,7 +41,9 @@ export type EncodedRequestSnapshot = Omit<
   },
   "t" | "a"
 > & {
-  t?: Array<RecursiveEncodedTrace>;
+  // Never optional, even with no spans to carry: the collector refuses an
+  // operation without the array, and the whole batch along with it.
+  t: Array<RecursiveEncodedTrace>;
   a?: EncodedAttributes;
 };
 
@@ -51,11 +53,9 @@ export class RequestSnapshotEncoder {
       snapshot,
       SNAPSHOT_KEY_MAP,
     );
-    if (snapshot.traces) {
-      encoded.t = snapshot.traces.map((trace) =>
-        encodeTrace(trace as CompleteTraceEventNode),
-      );
-    }
+    encoded.t = (snapshot.traces ?? []).map((trace) =>
+      encodeTrace(trace as CompleteTraceEventNode),
+    );
     if (snapshot.attributes) {
       encoded.a = remapKeys<
         NonNullable<RequestSnapshot["attributes"]>,

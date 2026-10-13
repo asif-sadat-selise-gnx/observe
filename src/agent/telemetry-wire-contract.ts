@@ -41,6 +41,12 @@ export interface FieldSpec {
   readonly alsoAccepts?: readonly FieldType[];
   /** The field must be present and non-null. */
   readonly required?: boolean;
+  /**
+   * For a required field whose absence has a meaning: what the sanitizer
+   * sends in its place, instead of dropping the entry over it. Plain JSON, as
+   * it travels to the worker with the shapes.
+   */
+  readonly fallback?: unknown;
   /** The field is an array of `type`. */
   readonly array?: boolean;
   /** Nested contract, for object fields the API models rather than passes through. */
@@ -75,6 +81,21 @@ const REQUEST_ATTRIBUTES: Shape = {
   ou: { type: "string" },
 };
 
+/**
+ * An operation's spans. Required - the API refuses an operation without the
+ * array, and the batch with it - but empty when there are none, including when
+ * the agent withheld them from a degraded account. Agents 0.2.1 to 0.3.9
+ * deleted the key instead, and every degraded batch carrying an ordinary
+ * request or job was refused whole.
+ */
+const TRACES: FieldSpec = {
+  type: "object",
+  array: true,
+  required: true,
+  fallback: [],
+  shape: TRACE_NODE,
+};
+
 /** No `st`: see the note at the top of this file. */
 const REQUEST_SNAPSHOT: Shape = {
   ct: { type: "string" },
@@ -87,7 +108,7 @@ const REQUEST_SNAPSHOT: Shape = {
   e: { type: "object" },
   rq: { type: "object" },
   a: { type: "object", shape: REQUEST_ATTRIBUTES },
-  t: { type: "object", array: true, shape: TRACE_NODE },
+  t: TRACES,
 };
 
 /** No `st` here either, for the same reason. */
@@ -105,7 +126,7 @@ const JOB_SNAPSHOT: Shape = {
   ma: { type: "number" },
   tg: { type: "object" },
   e: { type: "object" },
-  t: { type: "object", array: true, shape: TRACE_NODE },
+  t: TRACES,
 };
 
 /**
@@ -230,6 +251,7 @@ const OBJECTIVE_DECLARATION: Shape = {
 export const TELEMETRY_BATCH: Shape = {
   serviceId: { type: "string", required: true },
   serviceVersion: { type: "string" },
+  truncatedSpans: { type: "number" },
   forwardLogs: { type: "boolean" },
   snapshots: { type: "object", array: true, shape: REQUEST_SNAPSHOT },
   jobs: { type: "object", array: true, shape: JOB_SNAPSHOT },
@@ -387,7 +409,9 @@ export interface TelemetrySanitizer {
  * would have rejected the whole batch over them (`forbidNonWhitelisted`).
  * A *required* field that is missing or unusable cannot be repaired by
  * removal, so the entry is dropped alone rather than the collector dropping
- * the batch.
+ * the batch - unless the contract names a fallback for a missing one, as it
+ * does for an operation's spans: an operation without its trace array is sent
+ * with an empty one, which is what the absence meant.
  *
  * Numbers must be finite: `NaN` and `Infinity` survive `typeof` but serialize
  * to `null` in JSON, which arrives at the API as a present-but-null field and
@@ -438,7 +462,12 @@ export function createTelemetrySanitizer(
       const fieldPath = `${path}.${key}`;
       const present = value[key] !== undefined && value[key] !== null;
       if (!present) {
-        if (spec.required) {
+        if (spec.required && spec.fallback !== undefined) {
+          problems.push(
+            `${fieldPath}: required, sent as ${JSON.stringify(spec.fallback)}`,
+          );
+          value[key] = structuredClone(spec.fallback);
+        } else if (spec.required) {
           problems.push(`${fieldPath}: required`);
           usable = false;
         } else if (key in value) {

@@ -7,7 +7,6 @@ import {
 } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
 import { ObserveAgentSharedBuffer } from "../agent/observe-agent.shared-buffer.js";
-import { validateTelemetryPayload } from "../agent/telemetry-wire-contract.js";
 import { ObserveOptions } from "../interfaces/observe-options.interface.js";
 import { createObserveModule } from "../observe.module.js";
 import {
@@ -480,13 +479,8 @@ describe("@Objective: while the collector is withholding span trees", () => {
         objectives: [{ availability: 99.9 }],
       },
     ]);
-    // The declarations alone: the batch root also carries `truncatedSpans`,
-    // which the SDK's copy of the contract does not declare.
-    expect(
-      validateTelemetryPayload(
-        { serviceId: batch.serviceId, objectives: batch.objectives },
-        { forbidUnknown: true },
-      ),
-    ).toEqual([]);
+    // Every batch whole, the withheld trees and `truncatedSpans` included. A
+    // degraded batch the contract refuses is one the collector refuses too.
+    expect(collector.violations).toEqual([]);
   });
 });
