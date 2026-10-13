@@ -27,6 +27,7 @@
     "src",
     "vitest.config.ts",
     "vitest.int.config.ts",
+    "vitest.int.global-setup.ts",
     "vitest.setup.ts"
   ],
   "exclude": [

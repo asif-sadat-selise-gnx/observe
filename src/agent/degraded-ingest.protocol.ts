@@ -30,6 +30,26 @@ export function parseDegradedMessage(msg: string): boolean | null {
 }
 
 /**
+ * How the detached worker tells the main thread it will send nothing until a
+ * given time (epoch milliseconds): after a 429, until the pause lapses; after
+ * rejected credentials, never.
+ *
+ * Only the final flush reads it. A paused worker leaves the shared slot
+ * untouched, so without this a shutdown would wait out its whole deadline for
+ * a batch that was never going to be sent.
+ */
+export const PAUSED_MESSAGE_PREFIX = "observe:paused-until=";
+
+/** The time sends are paused until, or null if this is not that line. */
+export function parsePausedMessage(msg: string): number | null {
+  if (!msg.startsWith(PAUSED_MESSAGE_PREFIX)) {
+    return null;
+  }
+  const until = Number(msg.slice(PAUSED_MESSAGE_PREFIX.length));
+  return Number.isFinite(until) ? until : null;
+}
+
+/**
  * Duration past which the collector treats an execution as notable, in
  * milliseconds.
  *

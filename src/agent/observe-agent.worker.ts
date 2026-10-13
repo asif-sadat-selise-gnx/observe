@@ -4,8 +4,10 @@ import {
   Logger,
   OnApplicationShutdown,
   OnModuleInit,
+  Optional,
 } from "@nestjs/common";
 import { hostname } from "node:os";
+import { setTimeout as sleep } from "node:timers/promises";
 import { Worker } from "worker_threads";
 import { ObserveModuleOptionsWithDefaults } from "../interfaces/observe-options.interface.js";
 import { OBSERVE_OPTIONS } from "../observe.constants.js";
@@ -16,7 +18,11 @@ import {
   SpanSliceRecorder,
 } from "../profiling/span-slice-recorder.js";
 import { NodeRuntimeMetricsService } from "../services/node-runtime-metrics.service.js";
-import { parseDegradedMessage } from "./degraded-ingest.protocol.js";
+import { OperationTraceRegistry } from "../services/operation-trace.registry.js";
+import {
+  parseDegradedMessage,
+  parsePausedMessage,
+} from "./degraded-ingest.protocol.js";
 import {
   detachedWorkerData,
   detachedWorkerSource,
@@ -33,6 +39,38 @@ const DEFAULT_FLUSH_INTERVAL = 5000; // 5 seconds
 const DEFAULT_COLLECTOR_ENDPOINT =
   process.env.OBSERVE_ENDPOINT ?? "https://observe-api.nestjs.com";
 const MIN_FLUSH_INTERVAL = 1000; // 1 second
+
+/**
+ * How long shutdown waits for buffered telemetry to reach the collector before
+ * terminating the worker anyway, unless `shutdownFlushTimeout` says otherwise.
+ *
+ * Several times a healthy round trip to the hosted collector - gzip, a POST,
+ * a few-hundred-byte reply, a fresh TLS handshake if the kept-alive socket has
+ * gone - and well inside the grace period an orchestrator gives a process
+ * after SIGTERM (30 s on ECS and Kubernetes by default), which also has to
+ * cover the application's own shutdown hooks. The worker gives up on a silent
+ * collector only after its own, much longer, request timeout, so this is what
+ * keeps such a collector from holding shutdown open.
+ */
+const FINAL_FLUSH_TIMEOUT_MS = 2000;
+
+/**
+ * How often the final flush looks at the shared slot while the worker is
+ * sending. Not what bounds the drain: every batch also waits out the worker's
+ * 50 ms idle sleep before it is picked up, which is why the final flush sends
+ * the log backlog as one batch rather than 250 lines per round trip.
+ */
+const FINAL_FLUSH_POLL_MS = 10;
+
+/**
+ * The shortest window a last runtime sample is taken over at shutdown.
+ *
+ * A sample's CPU and event-loop figures are rates over the time since the
+ * previous one. Over a few milliseconds - a process that has only just
+ * started, or one stopped straight after a scheduled sample - they read as
+ * a pegged CPU and a saturated loop, and mean nothing.
+ */
+const MIN_FINAL_RUNTIME_WINDOW_MS = 10_000;
 
 /**
  * The credentials `nest new --observe` writes into `AppModule`.
@@ -65,13 +103,26 @@ export class ObserveAgentWorker implements OnModuleInit, OnApplicationShutdown {
   private isTerminating = false;
   private flushInterval: NodeJS.Timeout;
   private runtimeMetricsInterval: NodeJS.Timeout | null = null;
+  /** When the last runtime sample was taken, or sampling started. */
+  private lastRuntimeSampleAt = 0;
   private cpuProfiler: CpuProfilerService | null = null;
+  /** The one shutdown, however many times Nest asks for it. */
+  private shutdownPromise: Promise<void> | null = null;
+  /**
+   * Until when the worker has said it will send nothing (epoch ms) - after a
+   * 429, or for good after rejected credentials. Read by the final flush only.
+   */
+  private sendsPausedUntil = 0;
 
   constructor(
     private readonly observeAgentSharedBuffer: ObserveAgentSharedBuffer,
     @Inject(OBSERVE_OPTIONS)
     private readonly options: ObserveModuleOptionsWithDefaults,
     private readonly nodeRuntimeMetricsService: NodeRuntimeMetricsService,
+    // Optional so the agent can be built on its own, as its suites build it;
+    // the module always provides it.
+    @Optional()
+    private readonly operationTraceRegistry?: OperationTraceRegistry,
   ) {}
 
   onModuleInit() {
@@ -131,7 +182,9 @@ export class ObserveAgentWorker implements OnModuleInit, OnApplicationShutdown {
       interval = MIN_RUNTIME_METRICS_INTERVAL;
     }
 
+    this.lastRuntimeSampleAt = Date.now();
     this.runtimeMetricsInterval = setInterval(() => {
+      this.lastRuntimeSampleAt = Date.now();
       this.observeAgentSharedBuffer.addNodeRuntimeMetrics(
         this.nodeRuntimeMetricsService.collectNodeRuntimeMetrics(),
       );
@@ -213,11 +266,50 @@ export class ObserveAgentWorker implements OnModuleInit, OnApplicationShutdown {
     this.logger.log("Continuous profiling enabled.");
   }
 
-  async onApplicationShutdown() {
+  /**
+   * Sends what is still buffered, then stops the worker.
+   *
+   * Runs in `onApplicationShutdown` rather than `beforeApplicationShutdown`
+   * on purpose. Nest closes an application as destroy hooks, then
+   * before-shutdown hooks, then the HTTP server (letting in-flight requests
+   * finish, and record their snapshots), then shutdown hooks - so this is the
+   * last point at which requests are still being recorded. Forwarded log
+   * lines stop earlier, in the destroy phase (see StdoutForwarderService).
+   *
+   * Shutdown hooks run module by module, the root module first and global
+   * modules last - but global modules among themselves in reverse order of
+   * registration. One registered before ObserveModule shuts down after this
+   * hook, and what it records then stays in the main-thread buffer, unsent:
+   * BullModule, whose workers let their active jobs finish in their own
+   * shutdown hook, is the common case. Hence "import ObserveModule first" in
+   * the README; with `forRootAsync({ global: false })` this runs before every
+   * global module.
+   *
+   * On a signal, none of this runs unless the application called
+   * `app.enableShutdownHooks()` - without it Node ends the process at once.
+   *
+   * Called once however many times it is asked: `enableShutdownHooks()` plus
+   * an application's own signal handler calling `close()` both get here, and a
+   * second run would otherwise race the first for the worker.
+   */
+  onApplicationShutdown(): Promise<void> {
+    this.shutdownPromise ??= this.shutDown();
+    return this.shutdownPromise;
+  }
+
+  private async shutDown(): Promise<void> {
     if (this.flushInterval) {
       clearInterval(this.flushInterval);
     }
 
+    const timeoutMs =
+      this.options.shutdownFlushTimeout ?? FINAL_FLUSH_TIMEOUT_MS;
+    // Before the first `await`: on Nest 11 every shutdown hook in this module
+    // starts at once, and NodeRuntimeMetricsService stops its monitors as soon
+    // as this one yields. Nest 12 runs this hook first, as this class depends
+    // on that service.
+    const sampleRuntimeMetricsLast =
+      timeoutMs > 0 && this.worker !== null && this.takeFinalRuntimeSample();
     if (this.runtimeMetricsInterval) {
       clearInterval(this.runtimeMetricsInterval);
     }
@@ -228,17 +320,195 @@ export class ObserveAgentWorker implements OnModuleInit, OnApplicationShutdown {
       this.cpuProfiler = null;
     }
 
-    if (!this.worker) {
+    // No worker - scaffold credentials, or never started - means nothing was
+    // ever going to be sent, so there is nothing to flush either.
+    const worker = this.worker;
+    if (!worker) {
       return;
     }
 
+    // Set before the final flush rather than just before `terminate`: a worker
+    // that dies while draining must not be replaced by one nothing will stop.
     this.isTerminating = true;
-    await this.worker.terminate();
+
+    if (timeoutMs > 0) {
+      try {
+        await this.flushBeforeShutdown(
+          worker,
+          timeoutMs,
+          sampleRuntimeMetricsLast,
+        );
+      } catch (error) {
+        // `flush` reports its own failures; this is anything else, and a
+        // shutdown hook that throws would only trade lost telemetry for a
+        // shutdown that does not finish cleanly.
+        if (this.options.debug) {
+          this.logger.debug(
+            `Final flush before shutdown failed: ${String(error)}`,
+          );
+        }
+      }
+    }
+
+    await worker.terminate();
 
     if (this.options.debug) {
       this.logger.debug("Worker terminated successfully.");
     }
     this.worker = null;
+  }
+
+  /**
+   * Hands everything still buffered to the worker and waits for it to be
+   * sent, for at most `timeoutMs`.
+   *
+   * Telemetry sits in up to three places at shutdown: the main-thread batch
+   * (plus log lines held back for later batches), the shared slot, and the
+   * worker's in-flight request - the worker keeps the slot locked and filled
+   * until the collector has answered. The slot holds one batch, and a plain
+   * `flush()` skips while the worker holds it, so this is a loop: wait for the
+   * slot to empty, write the next batch, repeat until there is nothing left to
+   * write and the worker is done with the last one. Waiting for an empty slot
+   * before each write is also what stops the final flush overwriting a batch
+   * the worker has not read yet.
+   *
+   * Timed with `node:timers` and `process.uptime()` rather than the global
+   * `setTimeout` and `Date.now()`, which test suites' fake timers replace - a
+   * shutdown waiting on those would never finish.
+   *
+   * Never throws for a send: a refused or failed batch is reported by the
+   * worker as it always is, and clears the slot like a sent one. A worker
+   * paused after a 429, or refused for its credentials, says so and is not
+   * waited for.
+   */
+  private async flushBeforeShutdown(
+    worker: Worker,
+    timeoutMs: number,
+    sampleRuntimeMetrics: boolean,
+  ): Promise<void> {
+    const buffer = this.observeAgentSharedBuffer;
+    const deadline = process.uptime() * 1000 + timeoutMs;
+
+    // A worker that dies mid-drain will never empty the slot; there is no
+    // point waiting out the deadline for it.
+    let exited = false;
+    const onExit = () => {
+      exited = true;
+    };
+    worker.once("exit", onExit);
+
+    try {
+      // Every protocol records its snapshot from a `setTimeout(0)` after the
+      // response or job has finished, so the last requests a process served
+      // may not be in the buffer yet - and an empty buffer would end this
+      // before they land. A zero timer set now fires after the ones already
+      // queued, and the microtasks each of those starts run before it does.
+      // A trace whose spans were still open waits a further second in the
+      // registry; the loop below waits for those too.
+      await sleep(0);
+
+      for (;;) {
+        if (exited) {
+          if (this.options.debug) {
+            this.logger.debug(
+              "Worker exited before the final flush completed. Telemetry still buffered was not sent.",
+            );
+          }
+          return;
+        }
+
+        if (Date.now() < this.sendsPausedUntil) {
+          if (this.options.debug) {
+            this.logger.debug(
+              "The collector refused the last batch and sends are paused. Telemetry still buffered was not sent.",
+            );
+          }
+          return;
+        }
+
+        if (!buffer.hasBatchAwaitingWorker()) {
+          // The whole backlog in one batch once the batch before it has gone,
+          // not 250 lines per round trip: each batch also waits out the
+          // worker's idle sleep, and a full backlog would outlast the deadline.
+          if (buffer.isBufferEmpty()) {
+            buffer.drainPendingLogs(Number.POSITIVE_INFINITY);
+          }
+          this.flush();
+
+          if (
+            !buffer.hasBatchAwaitingWorker() &&
+            buffer.isBufferEmpty() &&
+            !buffer.hasPendingLogs() &&
+            !this.operationTraceRegistry?.hasSnapshotsAwaitingCompletion()
+          ) {
+            if (!sampleRuntimeMetrics) {
+              return;
+            }
+            // Taken only now that whatever was already buffered has gone: a
+            // batch carries a single runtime sample, and each sample covers the
+            // window since the previous one, so taking this earlier could
+            // replace an unsent sample and lose its window.
+            sampleRuntimeMetrics = false;
+            this.addFinalRuntimeMetrics();
+            continue;
+          }
+        }
+
+        if (process.uptime() * 1000 >= deadline) {
+          if (this.options.debug) {
+            this.logger.debug(
+              `Final flush did not complete within ${timeoutMs}ms. Telemetry still buffered was not sent.`,
+            );
+          }
+          return;
+        }
+
+        await sleep(FINAL_FLUSH_POLL_MS);
+      }
+    } finally {
+      worker.off("exit", onExit);
+    }
+  }
+
+  /**
+   * Adds the last runtime sample to the outgoing batch, or says it must wait
+   * until that batch has gone.
+   *
+   * Skipped when its window would be shorter than
+   * `MIN_FINAL_RUNTIME_WINDOW_MS`. Otherwise it rides the first batch the
+   * final flush sends - unless that batch already carries a sample, which it
+   * would replace; then it is taken last (returns `true`), when on Nest 11
+   * the monitors may already have stopped.
+   */
+  private takeFinalRuntimeSample(): boolean {
+    if (
+      !this.runtimeMetricsInterval ||
+      Date.now() - this.lastRuntimeSampleAt < MIN_FINAL_RUNTIME_WINDOW_MS
+    ) {
+      return false;
+    }
+    if (this.observeAgentSharedBuffer.hasRuntimeMetrics()) {
+      return true;
+    }
+    this.addFinalRuntimeMetrics();
+    return false;
+  }
+
+  /**
+   * The runtime-metrics window between the last scheduled sample and now.
+   */
+  private addFinalRuntimeMetrics() {
+    try {
+      this.observeAgentSharedBuffer.addNodeRuntimeMetrics(
+        this.nodeRuntimeMetricsService.collectNodeRuntimeMetrics(),
+      );
+    } catch (error) {
+      if (this.options.debug) {
+        this.logger.debug(
+          `Could not collect final runtime metrics: ${String(error)}`,
+        );
+      }
+    }
   }
 
   private get hasScaffoldCredentials(): boolean {
@@ -299,10 +569,16 @@ export class ObserveAgentWorker implements OnModuleInit, OnApplicationShutdown {
         appSecret: this.options.appSecret,
       }),
     });
+    this.watchWorker(this.worker);
 
-    this.worker.on("message", (msg) => this.handleMessage(msg));
-    this.worker.on("error", (error) => this.handleError(error));
-    this.worker.on("exit", (code) => {
+    this.logger.log("Observe agent worker initialized.");
+  }
+
+  /** The worker's messages, errors, and the restart when it dies. */
+  private watchWorker(worker: Worker) {
+    worker.on("message", (msg) => this.handleMessage(msg));
+    worker.on("error", (error) => this.handleError(error));
+    worker.on("exit", (code) => {
       if (this.isTerminating) {
         this.logger.debug("Worker exited on shutdown.");
         return;
@@ -316,11 +592,15 @@ export class ObserveAgentWorker implements OnModuleInit, OnApplicationShutdown {
         this.logger.debug("Worker exited gracefully.");
       }
     });
-
-    this.logger.log("Observe agent worker initialized.");
   }
 
   handleMessage(msg: string) {
+    const pausedUntil = parsePausedMessage(msg);
+    if (pausedUntil !== null) {
+      this.sendsPausedUntil = pausedUntil;
+      return;
+    }
+
     const degraded = parseDegradedMessage(msg);
     if (degraded !== null) {
       this.applyDegraded(degraded);

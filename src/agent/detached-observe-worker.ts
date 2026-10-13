@@ -18,6 +18,8 @@ export interface DetachedWorkerConfig {
   wireShapes: Parameters<typeof createTelemetrySanitizer>[0];
   /** `DEGRADED_MESSAGE_PREFIX`, as data - see where it is read below. */
   degradedPrefix: string;
+  /** `PAUSED_MESSAGE_PREFIX`, as data, for the same reason. */
+  pausedPrefix: string;
 }
 
 export interface DetachedWorkerData {
@@ -82,6 +84,7 @@ export const detachedObserveWorker = (
   // `ReferenceError` here. Passed in so the prefix has a single definition
   // that `parseDegradedMessage` still matches.
   const degradedPrefix = config.degradedPrefix;
+  const pausedPrefix = config.pausedPrefix;
 
   /**
    * Built here, used only when the collector answers 400. The shapes travel
@@ -256,6 +259,18 @@ export const detachedObserveWorker = (
     timeout: KEEP_ALIVE_IDLE_MS,
   });
 
+  /**
+   * How long a send may go without any activity on its socket before it is
+   * abandoned.
+   *
+   * The agent's `timeout` above only emits an event nobody acts on, and the
+   * send holds the shared buffer's lock: a collector or proxy that accepts the
+   * connection and never answers would otherwise stop every later batch for
+   * the life of the process. Abandoned, it fails like any unreachable
+   * collector - reported, the batch dropped, the lock released.
+   */
+  const REQUEST_TIMEOUT_MS = 15_000;
+
   /** What the code below reads from a collector reply. */
   interface CollectorResponse {
     ok: boolean;
@@ -321,6 +336,14 @@ export const detachedObserveWorker = (
             {
               reusedSocket: req.reusedSocket,
             },
+          ),
+        ),
+      );
+      req.setTimeout(REQUEST_TIMEOUT_MS, () =>
+        req.destroy(
+          Object.assign(
+            new Error(`no answer within ${REQUEST_TIMEOUT_MS / 1000} s`),
+            { code: "ETIMEDOUT" },
           ),
         ),
       );
@@ -488,6 +511,9 @@ export const detachedObserveWorker = (
       if (!response.ok) {
         if (response.status === 401 || response.status === 403) {
           authRejections += 1;
+          // Nothing will be accepted until a restart, so a final flush has
+          // nothing to wait for.
+          parentPort.postMessage(`${pausedPrefix}${Number.MAX_SAFE_INTEGER}`);
 
           // Said plainly, and once. The batch is well-formed and the
           // credentials are not accepted for this application; left as a
@@ -512,6 +538,9 @@ export const detachedObserveWorker = (
         if (response.status === 429) {
           const pauseMs = rateLimitPauseMs(response);
           rateLimitedUntil = Date.now() + pauseMs;
+          // The slot is left alone until then, which a final flush would
+          // otherwise read as a send still in progress.
+          parentPort.postMessage(`${pausedPrefix}${rateLimitedUntil}`);
 
           // The body says which refusal this is - a quota, a quota frozen by
           // a declined payment, or a rate cap - and each needs a different

@@ -220,6 +220,19 @@ export interface ObserveOptions {
   flushInterval?: number;
 
   /**
+   * How long, in milliseconds, closing the application waits for buffered
+   * telemetry to reach the collector before stopping the agent anyway. Runs
+   * on `app.close()`, and on a shutdown signal when the application called
+   * `app.enableShutdownHooks()`.
+   *
+   * `0` skips the final send - for test suites that boot the application
+   * with real credentials and should neither send their requests to the
+   * project nor wait on the collector at every `close()`.
+   * @default 2000
+   */
+  shutdownFlushTimeout?: number;
+
+  /**
    * Whether to collect runtime metrics: memory, CPU load, GC and event loop
    * latency, sampled on an interval and drawn as gauges.
    *

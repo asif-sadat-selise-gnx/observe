@@ -660,6 +660,22 @@ describe("ObserveAgentSharedBuffer", () => {
     });
   });
 
+  describe("handing a batch to the worker", () => {
+    it("reports a written batch as awaiting the worker until the slot is cleared", () => {
+      const buffer = createBuffer();
+      expect(buffer.hasBatchAwaitingWorker()).toBe(false);
+
+      buffer.pushLogs(logs(1));
+      buffer.encodeAndWrite();
+      expect(buffer.hasBatchAwaitingWorker()).toBe(true);
+
+      // What the worker does once the collector has answered: zero the length
+      // in the same shared memory, then release the lock.
+      new DataView(buffer.sharedBuffer, 4, 4).setUint32(0, 0);
+      expect(buffer.hasBatchAwaitingWorker()).toBe(false);
+    });
+  });
+
   describe("custom metrics", () => {
     afterEach(() => {
       vi.restoreAllMocks();

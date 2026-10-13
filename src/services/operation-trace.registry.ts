@@ -690,6 +690,17 @@ export class OperationTraceRegistry {
     this.traceSnapshots.delete(traceId);
   }
 
+  /**
+   * Plucks waiting out `SNAPSHOT_COMPLETION_TIMEOUT_MS` for spans that were
+   * still open when their operation ended. Their snapshots reach the buffer
+   * only once the wait is over, which a final flush has to wait for.
+   */
+  private awaitingCompletion = 0;
+
+  hasSnapshotsAwaitingCompletion(): boolean {
+    return this.awaitingCompletion > 0;
+  }
+
   async pluckSnapshot(
     traceId: string,
   ): Promise<RequestSnapshot | JobSnapshot | undefined> {
@@ -702,9 +713,14 @@ export class OperationTraceRegistry {
 
       // Ensure snapshot is complete by checking refsCounter vs refsMarkedAsComplete
       if (snapshot.refsCounter > snapshot.refsMarkedAsComplete) {
-        await new Promise((resolve) =>
-          setTimeout(resolve, SNAPSHOT_COMPLETION_TIMEOUT_MS),
-        );
+        this.awaitingCompletion += 1;
+        try {
+          await new Promise((resolve) =>
+            setTimeout(resolve, SNAPSHOT_COMPLETION_TIMEOUT_MS),
+          );
+        } finally {
+          this.awaitingCompletion -= 1;
+        }
         if (snapshot.refsCounter > snapshot.refsMarkedAsComplete) {
           cleanup();
           return undefined;

@@ -120,10 +120,13 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
     instrument: ObserveInstrument,
   });
+  app.enableShutdownHooks();
   await app.listen(3000);
 }
 bootstrap();
 ```
+
+`enableShutdownHooks()` is what lets the agent send what it still holds when the process is stopped - a deploy, a scale-in. Without it Nest runs no shutdown hooks on `SIGTERM`, and the last few seconds of telemetry, the last requests' errors among them, are lost. For the same reason, import `ObserveModule` before other global modules such as `BullModule`: global modules shut down in reverse order of import, and jobs that finish after the agent has stopped are not sent.
 
 ### Async configuration
 
@@ -322,6 +325,7 @@ Every option, with its default. The [documentation](https://www.observe.nestjs.c
 | `serviceVersion`         | inferred                            | The release the process runs, at most 50 characters - see [What it records without any code](#what-it-records-without-any-code). `false` reports none.                                          |
 | `endpoint`               | `https://observe-api.nestjs.com`    | The collector's base URL. `OBSERVE_ENDPOINT` in the environment changes the default without touching the config.                                                                                  |
 | `flushInterval`          | `5000`                              | Milliseconds between sends of buffered telemetry; at least `1000`.                                                                                                                                |
+| `shutdownFlushTimeout`   | `2000`                              | Milliseconds closing the app waits for buffered telemetry to reach the collector before stopping the agent. `0` skips the final send - for test suites that boot the app with real credentials.   |
 | `maxTracesPerBatch`      | `1000`                              | The most traces one send carries.                                                                                                                                                                 |
 | `tracesSampleRate`       | `1.0`                               | The share of traces kept, or a function `(protocol, attributes) => boolean` deciding per trace. `0` counts as unset and keeps every trace; `() => false` keeps none.                              |
 | `spanCollapse`           | `{ threshold: 20, keepSlowest: 3 }` | See [Repeated spans](#repeated-spans). `false` ships every span.                                                                                                                                  |
