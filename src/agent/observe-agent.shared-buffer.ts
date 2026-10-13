@@ -373,16 +373,27 @@ export class ObserveAgentSharedBuffer {
     return !this._mainThreadBuffer;
   }
 
+  /** Whether log lines are held back for a later batch. */
+  hasPendingLogs() {
+    return this._pendingLogs.length > 0;
+  }
+
+  /** Whether the outgoing batch already carries a runtime-metrics sample. */
+  hasRuntimeMetrics() {
+    return this._mainThreadBuffer?.runtime !== undefined;
+  }
+
   /**
    * Whether a batch written by `encodeAndWrite` is still in the shared slot -
    * not yet taken by the worker, or taken and still being sent.
    *
-   * The worker holds the lock from reading the slot until the collector has
+   * Once the worker takes the slot it holds the lock until the collector has
    * answered (or the send has failed), and zeroes the length just before it
    * lets go, on every path. So a non-zero length means the worker is not done
    * with the last batch, which is what a shutdown waits on before writing
-   * another one or terminating the thread. Read without the lock: a stale
-   * answer only costs the caller one more look.
+   * another one or terminating the thread - unless the worker has said it is
+   * paused (`PAUSED_MESSAGE_PREFIX`), in which case it leaves the slot alone.
+   * Read without the lock: a stale answer only costs the caller one more look.
    */
   hasBatchAwaitingWorker() {
     return new DataView(this._sharedBuffer, 4, 4).getUint32(0) !== 0;
@@ -521,8 +532,11 @@ export class ObserveAgentSharedBuffer {
    * batch is not ordered by time. Nothing downstream depends on that: every
    * entry carries its own timestamp, the recorder inserts by it, and the log
    * views sort on it.
+   *
+   * `maxLogs` lifts the per-batch cap for the final flush, which sends the
+   * whole backlog in one batch rather than one round trip per 250 lines.
    */
-  drainPendingLogs() {
+  drainPendingLogs(maxLogs = MAX_LOGS_PER_TRANSACTION) {
     if (this._pendingLogs.length === 0) {
       return;
     }
@@ -534,8 +548,7 @@ export class ObserveAgentSharedBuffer {
       this._mainThreadBuffer.logs = [];
     }
 
-    const capacity =
-      MAX_LOGS_PER_TRANSACTION - this._mainThreadBuffer.logs.length;
+    const capacity = maxLogs - this._mainThreadBuffer.logs.length;
     if (capacity <= 0) {
       return;
     }

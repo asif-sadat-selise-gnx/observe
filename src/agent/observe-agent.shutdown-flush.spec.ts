@@ -1,25 +1,34 @@
 import { EventEmitter } from "node:events";
+import {
+  clearInterval as clearRealInterval,
+  setInterval as setRealInterval,
+} from "node:timers";
+import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { RuntimeMetricsEncoder } from "../encoders/runtime-metrics.encoder.js";
 import { ObserveModuleOptionsWithDefaults } from "../interfaces/observe-options.interface.js";
 import { NodeRuntimeMetricsService } from "../services/node-runtime-metrics.service.js";
+import { OperationTraceRegistry } from "../services/operation-trace.registry.js";
+import { PAUSED_MESSAGE_PREFIX } from "./degraded-ingest.protocol.js";
 import { ObserveAgentSharedBuffer } from "./observe-agent.shared-buffer.js";
 import { ObserveAgentWorker } from "./observe-agent.worker.js";
 
-/** `FINAL_FLUSH_TIMEOUT_MS` in the worker. */
-const FINAL_FLUSH_TIMEOUT_MS = 2000;
-
 /** `MAX_LOGS_PER_TRANSACTION` in the shared buffer. */
 const MAX_LOGS_PER_TRANSACTION = 250;
+
+/** `MAX_PENDING_LOGS` in the shared buffer. */
+const MAX_PENDING_LOGS = 2000;
 
 /**
  * Stands in for the worker thread on the other side of the shared buffer.
  *
  * The real thread's contract with the main thread is entirely in shared
- * memory: it reads the batch at offset 8, sends it, and zeroes the length at
- * offset 4 once the collector has answered. This does the same on a timer
- * (when `consuming`), recording each batch it took, and notes how many it had
- * taken when `terminate` was called - which is what "sent before shutdown"
- * comes down to.
+ * memory: it takes the lock, reads the batch at offset 8, sends it, zeroes the
+ * length at offset 4 and lets go. This does the same on its own timer (when
+ * `consuming`), recording each batch it took, and notes how many it had taken
+ * when `terminate` was called - which is what "sent before shutdown" comes
+ * down to. The timer is `node:timers`, not the global one, so fake timers in a
+ * suite stop it no more than they would stop a real thread.
  */
 class FakeWorkerThread extends EventEmitter {
   readonly batches: Array<{
@@ -28,42 +37,54 @@ class FakeWorkerThread extends EventEmitter {
   }> = [];
   batchesAtTerminate: number | undefined;
   consuming = true;
+  private readonly lock: Int32Array;
   private readonly timer: NodeJS.Timeout;
 
   readonly terminate = vi.fn(async () => {
     this.batchesAtTerminate = this.batches.length;
-    clearInterval(this.timer);
+    clearRealInterval(this.timer);
     this.emit("exit", 1);
     return 1;
   });
 
   constructor(private readonly sharedBuffer: SharedArrayBuffer) {
     super();
-    this.timer = setInterval(() => this.consume(), 5);
+    this.lock = new Int32Array(sharedBuffer, 0, 1);
+    this.timer = setRealInterval(() => this.consume(), 5);
   }
 
   /** Dies on its own, as a crashed thread would. */
   crash() {
-    clearInterval(this.timer);
+    clearRealInterval(this.timer);
     this.emit("exit", 1);
   }
 
+  /** Answered 429: says so, as the real worker does, and leaves the slot be. */
+  pauseAfter429() {
+    this.consuming = false;
+    this.emit("message", `${PAUSED_MESSAGE_PREFIX}${Date.now() + 60_000}`);
+  }
+
   stop() {
-    clearInterval(this.timer);
+    clearRealInterval(this.timer);
   }
 
   private consume() {
-    if (!this.consuming) {
+    if (!this.consuming || Atomics.compareExchange(this.lock, 0, 0, 1) !== 0) {
       return;
     }
-    const length = new DataView(this.sharedBuffer, 4, 4);
-    const size = length.getUint32(0);
-    if (size === 0) {
-      return;
+    try {
+      const length = new DataView(this.sharedBuffer, 4, 4);
+      const size = length.getUint32(0);
+      if (size === 0) {
+        return;
+      }
+      const bytes = new Uint8Array(this.sharedBuffer).slice(8, 8 + size);
+      this.batches.push(JSON.parse(new TextDecoder().decode(bytes)));
+      length.setUint32(0, 0);
+    } finally {
+      Atomics.store(this.lock, 0, 0);
     }
-    const bytes = new Uint8Array(this.sharedBuffer).slice(8, 8 + size);
-    this.batches.push(JSON.parse(new TextDecoder().decode(bytes)));
-    length.setUint32(0, 0);
   }
 }
 
@@ -83,7 +104,10 @@ describe("ObserveAgentWorker shutdown flush", () => {
   let fake: FakeWorkerThread | undefined;
   let metrics: NodeRuntimeMetricsService | undefined;
 
-  const boot = (overrides: Partial<ObserveModuleOptionsWithDefaults> = {}) => {
+  const boot = (
+    overrides: Partial<ObserveModuleOptionsWithDefaults> = {},
+    registry?: Pick<OperationTraceRegistry, "hasSnapshotsAwaitingCompletion">,
+  ) => {
     const options = {
       serviceId: "svc",
       appKey: "k",
@@ -99,24 +123,37 @@ describe("ObserveAgentWorker shutdown flush", () => {
     metrics = new NodeRuntimeMetricsService(options);
     metrics.onModuleInit();
 
-    const agent = new ObserveAgentWorker(buffer, options, metrics);
-    const logger = (
-      agent as unknown as {
-        logger: { error: () => void; debug: () => void; log: () => void };
-      }
-    ).logger;
-    const error = vi.spyOn(logger, "error").mockImplementation(() => undefined);
-    vi.spyOn(logger, "debug").mockImplementation(() => undefined);
-    vi.spyOn(logger, "log").mockImplementation(() => undefined);
+    const agent = new ObserveAgentWorker(
+      buffer,
+      options,
+      metrics,
+      registry as OperationTraceRegistry | undefined,
+    );
+    const internals = agent as unknown as {
+      logger: { error: () => void; debug: () => void; log: () => void };
+      worker: unknown;
+      lastRuntimeSampleAt: number;
+      watchWorker: (worker: unknown) => void;
+    };
+    const error = vi
+      .spyOn(internals.logger, "error")
+      .mockImplementation(() => undefined);
+    vi.spyOn(internals.logger, "debug").mockImplementation(() => undefined);
+    vi.spyOn(internals.logger, "log").mockImplementation(() => undefined);
 
     const thread = new FakeWorkerThread(buffer.sharedBuffer);
-    vi.spyOn(agent, "initializeWorker").mockImplementation(() => {
-      (agent as unknown as { worker: unknown }).worker = thread;
-    });
+    const initializeWorker = vi
+      .spyOn(agent, "initializeWorker")
+      .mockImplementation(() => {
+        internals.worker = thread;
+        // The real listeners, so a thread that exits mid-flush meets the same
+        // restart logic it would in production.
+        internals.watchWorker(thread);
+      });
     agent.onModuleInit();
     fake = thread;
 
-    return { agent, buffer, thread, error };
+    return { agent, buffer, thread, error, initializeWorker, internals };
   };
 
   afterEach(async () => {
@@ -155,17 +192,52 @@ describe("ObserveAgentWorker shutdown flush", () => {
     expect(thread.batches[0].logs?.[0].text).toBe("just-finished-0");
   });
 
-  it("sends every batch a log backlog needs, not just the first", async () => {
-    const { agent, buffer, thread } = boot();
-    // More than one batch holds: the rest waits in the backlog, and only
-    // repeated flushes bring it out.
-    buffer.pushLogs(logLines(MAX_LOGS_PER_TRANSACTION * 2 + 10, "burst"));
+  it("waits for snapshots the registry is still completing", async () => {
+    let completing = true;
+    const { agent, buffer, thread } = boot(
+      {},
+      { hasSnapshotsAwaitingCompletion: () => completing },
+    );
+    // A trace whose spans were still open when it ended lands a second later.
+    setTimeout(() => {
+      buffer.pushLogs(logLines(1, "completed-late"));
+      completing = false;
+    }, 100);
 
     await agent.onApplicationShutdown();
 
-    expect(thread.batchesAtTerminate).toBe(3);
+    expect(thread.batches.flatMap((batch) => batch.logs ?? [])).toEqual([
+      expect.objectContaining({ text: "completed-late-0" }),
+    ]);
+  });
+
+  it("sends a full log backlog in two batches, not one per 250 lines", async () => {
+    const { agent, buffer, thread } = boot();
+    buffer.pushLogs(
+      logLines(MAX_LOGS_PER_TRANSACTION + MAX_PENDING_LOGS, "burst"),
+    );
+
+    await agent.onApplicationShutdown();
+
+    expect(thread.batchesAtTerminate).toBe(2);
+    expect(thread.batches[0].logs).toHaveLength(MAX_LOGS_PER_TRANSACTION);
     const sent = thread.batches.flatMap((batch) => batch.logs ?? []);
-    expect(sent).toHaveLength(MAX_LOGS_PER_TRANSACTION * 2 + 10);
+    expect(sent).toHaveLength(MAX_LOGS_PER_TRANSACTION + MAX_PENDING_LOGS);
+  });
+
+  it("keeps draining the backlog when a final batch fails to encode", async () => {
+    const { agent, buffer, thread } = boot();
+    buffer.pushLogs(logLines(MAX_LOGS_PER_TRANSACTION + 10, "burst"));
+    vi.spyOn(buffer, "encodeAndWrite").mockImplementationOnce(() => {
+      throw new Error("Payload too large for shared buffer");
+    });
+
+    await agent.onApplicationShutdown();
+
+    // The first batch is lost; the ten lines held back are not.
+    expect(thread.batches.flatMap((batch) => batch.logs ?? [])).toHaveLength(
+      10,
+    );
   });
 
   it("waits for the batch the worker is still sending instead of overwriting it", async () => {
@@ -177,7 +249,7 @@ describe("ObserveAgentWorker shutdown flush", () => {
     buffer.pushLogs(logLines(1, "still-buffered"));
 
     const shutdown = agent.onApplicationShutdown();
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await sleep(50);
     thread.consuming = true;
     await shutdown;
 
@@ -187,21 +259,50 @@ describe("ObserveAgentWorker shutdown flush", () => {
     expect(thread.batchesAtTerminate).toBe(2);
   });
 
-  it("includes a last runtime-metrics sample when runtime metrics are on", async () => {
-    const { agent, buffer, thread } = boot({ runtimeMetrics: true });
+  it("puts a last runtime sample in the first batch when none is pending", async () => {
+    const { agent, buffer, thread, internals } = boot({
+      runtimeMetrics: true,
+    });
+    internals.lastRuntimeSampleAt = Date.now() - 60_000;
     buffer.pushLogs(logLines(1, "before"));
 
     await agent.onApplicationShutdown();
 
-    expect(thread.batchesAtTerminate).toBe(thread.batches.length);
-    expect(thread.batches.at(-1)?.runtime).toBeDefined();
+    expect(thread.batchesAtTerminate).toBe(1);
+    expect(thread.batches[0].runtime).toBeDefined();
+  });
+
+  it("sends a pending runtime sample before taking the last one", async () => {
+    const { agent, buffer, thread, internals } = boot({
+      runtimeMetrics: true,
+    });
+    internals.lastRuntimeSampleAt = Date.now() - 60_000;
+    const pending = metrics!.collectNodeRuntimeMetrics();
+    buffer.addNodeRuntimeMetrics(pending);
+
+    await agent.onApplicationShutdown();
+
+    // Taken first, the last sample would have replaced the pending one.
+    expect(thread.batchesAtTerminate).toBe(2);
+    expect(thread.batches[0].runtime).toEqual(
+      JSON.parse(JSON.stringify(RuntimeMetricsEncoder.encode(pending))),
+    );
+    expect(thread.batches[1].runtime).toBeDefined();
+  });
+
+  it("takes no last runtime sample for a process that has only just started", async () => {
+    const { agent, buffer, thread } = boot({ runtimeMetrics: true });
+    buffer.pushLogs(logLines(1, "short-lived"));
+
+    await agent.onApplicationShutdown();
+
+    expect(thread.batches).toHaveLength(1);
+    expect(thread.batches[0].runtime).toBeUndefined();
   });
 
   it("terminates anyway when the worker never finishes the send", async () => {
-    vi.useFakeTimers();
-    const { agent, buffer, thread } = boot();
-    // A collector that never answers: the worker keeps the slot filled, and
-    // the request it is waiting on carries no timeout of its own.
+    const { agent, buffer, thread } = boot({ shutdownFlushTimeout: 200 });
+    // A collector that never answers: the worker keeps the slot filled.
     thread.consuming = false;
     buffer.pushLogs(logLines(1, "in-flight"));
     agent.flush();
@@ -212,18 +313,69 @@ describe("ObserveAgentWorker shutdown flush", () => {
       finished = true;
     });
 
-    await vi.advanceTimersByTimeAsync(FINAL_FLUSH_TIMEOUT_MS - 100);
+    await sleep(100);
     expect(finished).toBe(false);
-
-    await vi.advanceTimersByTimeAsync(200);
     await shutdown;
 
-    expect(finished).toBe(true);
     expect(thread.terminate).toHaveBeenCalledTimes(1);
     // The unread batch was left as it was, not replaced by the later one.
     thread.consuming = true;
     (thread as unknown as { consume: () => void }).consume();
     expect(thread.batches[0].logs?.[0].text).toBe("in-flight-0");
+  });
+
+  it("does not wait for a worker paused after a 429", async () => {
+    const { agent, buffer, thread } = boot();
+    thread.pauseAfter429();
+    // The paused worker leaves this batch where the last scheduled flush put it.
+    buffer.pushLogs(logLines(1, "parked"));
+    agent.flush();
+    buffer.pushLogs(logLines(1, "never-sent"));
+
+    const started = process.uptime();
+    await agent.onApplicationShutdown();
+
+    expect((process.uptime() - started) * 1000).toBeLessThan(500);
+    expect(thread.terminate).toHaveBeenCalledTimes(1);
+    expect(thread.batches).toEqual([]);
+  });
+
+  it("finishes under fake timers", async () => {
+    vi.useFakeTimers();
+    const { agent, buffer, thread } = boot();
+    buffer.pushLogs(logLines(1, "faked"));
+
+    // Hung forever when the wait ran on the global `setTimeout` and the
+    // deadline on `Date.now()`, both of which fake timers replace.
+    await agent.onApplicationShutdown();
+
+    expect(thread.batches[0].logs?.[0].text).toBe("faked-0");
+    expect(thread.terminate).toHaveBeenCalledTimes(1);
+  });
+
+  it("shuts down once when asked twice", async () => {
+    const { agent, buffer, thread } = boot();
+    thread.consuming = false;
+    buffer.pushLogs(logLines(1, "twice"));
+
+    const first = agent.onApplicationShutdown();
+    await sleep(20);
+    const second = agent.onApplicationShutdown();
+    thread.consuming = true;
+
+    await expect(Promise.all([first, second])).resolves.toBeDefined();
+    expect(thread.terminate).toHaveBeenCalledTimes(1);
+    expect(thread.batches).toHaveLength(1);
+  });
+
+  it("skips the final send when shutdownFlushTimeout is 0", async () => {
+    const { agent, buffer, thread } = boot({ shutdownFlushTimeout: 0 });
+    buffer.pushLogs(logLines(1, "test-suite"));
+
+    await agent.onApplicationShutdown();
+
+    expect(thread.batches).toEqual([]);
+    expect(thread.terminate).toHaveBeenCalledTimes(1);
   });
 
   it("terminates and does not throw when writing the final batch fails", async () => {
@@ -241,23 +393,19 @@ describe("ObserveAgentWorker shutdown flush", () => {
     expect(error).toHaveBeenCalledTimes(1);
   });
 
-  it("stops waiting as soon as the worker dies mid-flush", async () => {
-    vi.useFakeTimers();
-    const { agent, buffer, thread } = boot();
+  it("stops waiting when the worker dies mid-flush, and does not restart it", async () => {
+    const { agent, buffer, thread, initializeWorker } = boot();
     thread.consuming = false;
     buffer.pushLogs(logLines(1, "stranded"));
 
-    let finished = false;
-    const shutdown = agent.onApplicationShutdown().then(() => {
-      finished = true;
-    });
-    await vi.advanceTimersByTimeAsync(50);
+    const shutdown = agent.onApplicationShutdown();
+    await sleep(50);
     thread.crash();
-    await vi.advanceTimersByTimeAsync(50);
     await shutdown;
 
-    expect(finished).toBe(true);
     expect(thread.terminate).toHaveBeenCalledTimes(1);
+    // Once at start-up; a restart here would leave a thread nothing stops.
+    expect(initializeWorker).toHaveBeenCalledTimes(1);
   });
 
   it("sends nothing with the scaffold credentials, where no worker is started", async () => {
@@ -267,12 +415,11 @@ describe("ObserveAgentWorker shutdown flush", () => {
     });
     // `onModuleInit` skips `initializeWorker` on this path, so the fake never
     // becomes the agent's worker.
-    const encode = vi.spyOn(buffer, "encodeAndWrite");
     buffer.pushLogs(logLines(1, "placeholder"));
 
     await agent.onApplicationShutdown();
 
-    expect(encode).not.toHaveBeenCalled();
     expect(fake?.terminate).not.toHaveBeenCalled();
+    expect(fake?.batches).toEqual([]);
   });
 });

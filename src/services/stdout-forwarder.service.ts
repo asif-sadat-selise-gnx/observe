@@ -96,6 +96,14 @@ export class StdoutForwarderService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  /**
+   * Stops forwarding at the first close phase - before in-flight requests
+   * finish and before the final flush. Lines written after this point, a
+   * draining request's included, are not sent; its snapshot still is. Moving
+   * this later needs care: forwarding during the final flush would feed the
+   * agent's own "could not reach the collector" lines back into the batches
+   * it is trying to send.
+   */
   onModuleDestroy() {
     this.restore();
   }
