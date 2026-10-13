@@ -1,6 +1,20 @@
 import { Counter } from "../custom-metrics/counter.js";
+import { Gauge } from "../custom-metrics/gauge.js";
+import { Summary } from "../custom-metrics/summary.js";
+import type { EncodedCustomMetric } from "../encoders/custom-metrics.encoder.js";
+import type { EncodedJobSnapshot } from "../encoders/job-snapshot.encoder.js";
+import type { EncodedRequestSnapshot } from "../encoders/request-snapshot.encoder.js";
+import type { JobSnapshot } from "../interfaces/job-snapshot.interface.js";
 import { ObserveModuleOptionsWithDefaults } from "../interfaces/observe-options.interface.js";
+import type { RequestSnapshot } from "../interfaces/request-snapshot.interface.js";
+import type { CompleteTraceEventNode } from "../interfaces/trace-events.interfaces.js";
+import { DEGRADED_TTL_MS } from "./degraded-ingest.protocol.js";
 import { ObserveAgentSharedBuffer } from "./observe-agent.shared-buffer.js";
+import {
+  createTelemetrySanitizer,
+  SECTION_SHAPES,
+  validateTelemetryPayload,
+} from "./telemetry-wire-contract.js";
 
 const MAX_LOGS_PER_TRANSACTION = 250;
 const MAX_PENDING_LOGS = 2000;
@@ -38,6 +52,267 @@ const pendingOf = (buffer: ObserveAgentSharedBuffer) =>
  * metrics too. These cases are about that boundary.
  */
 describe("ObserveAgentSharedBuffer", () => {
+  describe("serialized traces during degraded ingestion", () => {
+    type SerializedBatch = {
+      serviceId: string;
+      forwardLogs: boolean;
+      snapshots: EncodedRequestSnapshot[];
+      jobs: EncodedJobSnapshot[];
+      custom?: EncodedCustomMetric[];
+      truncatedSpans?: number;
+    };
+
+    const traces = (): CompleteTraceEventNode[] => [
+      {
+        name: "Service.run",
+        origin: "auto",
+        className: "Service",
+        methodKey: "run",
+        duration: 10,
+        children: [
+          {
+            name: "Repository.read",
+            origin: "auto",
+            className: "Repository",
+            methodKey: "read",
+            duration: 2,
+            children: [],
+          },
+        ],
+      },
+    ];
+
+    const insertOperations = (
+      buffer: ObserveAgentSharedBuffer,
+      request: Partial<RequestSnapshot> = {},
+      job: Partial<JobSnapshot> = {},
+    ) => {
+      buffer.insertRequestSnapshot({
+        traceId: "request-trace",
+        protocol: "http",
+        operationId: "/health",
+        attributes: { method: "GET", statusCode: 200 },
+        duration: 10,
+        traces: traces(),
+        ...request,
+      });
+      buffer.insertJobSnapshot({
+        id: "job-1",
+        traceId: "job-trace",
+        name: "scheduled-task",
+        queueName: "cron",
+        status: "completed",
+        duration: 10,
+        traces: traces(),
+        ...job,
+      });
+    };
+
+    const readBatch = (buffer: ObserveAgentSharedBuffer): SerializedBatch => {
+      buffer.encodeAndWrite();
+      const length = new DataView(buffer.sharedBuffer, 4, 4).getUint32(0);
+      return JSON.parse(
+        new TextDecoder().decode(
+          new Uint8Array(buffer.sharedBuffer, 8, length),
+        ),
+      );
+    };
+
+    const expectTraceArrays = (batch: SerializedBatch) => {
+      // The local contract accepts an absent `t`, so validation alone cannot
+      // catch an operation whose trace array was lost during serialization.
+      for (const entry of [...batch.snapshots, ...batch.jobs]) {
+        expect(Array.isArray(entry.t)).toBe(true);
+      }
+    };
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("keeps nested request and job trees during normal ingestion", () => {
+      const buffer = createBuffer();
+      insertOperations(buffer);
+
+      const batch = readBatch(buffer);
+
+      expectTraceArrays(batch);
+      expect(batch.snapshots[0].t?.[0].ch?.[0].n).toBe("Repository.read");
+      expect(batch.jobs[0].t).toEqual(batch.snapshots[0].t);
+      expect(batch).not.toHaveProperty("truncatedSpans");
+    });
+
+    it.each([10, 1_000])(
+      "keeps operation rows with empty trace arrays at %i ms when degraded",
+      (duration) => {
+        const buffer = createBuffer();
+        buffer.setDegraded(true);
+        insertOperations(buffer, { duration }, { duration });
+
+        const batch = readBatch(buffer);
+
+        expectTraceArrays(batch);
+        expect(batch.snapshots).toEqual([
+          {
+            ti: "request-trace",
+            p: "http",
+            op: "/health",
+            a: { m: "GET", sc: 200 },
+            d: duration,
+            t: [],
+          },
+        ]);
+        expect(batch.jobs).toEqual([
+          {
+            i: "job-1",
+            ti: "job-trace",
+            n: "scheduled-task",
+            q: "cron",
+            s: "completed",
+            d: duration,
+            t: [],
+          },
+        ]);
+        expect(batch.truncatedSpans).toBe(4);
+      },
+    );
+
+    it("keeps empty trace arrays without counting spans that do not exist", () => {
+      const buffer = createBuffer();
+      buffer.setDegraded(true);
+      insertOperations(buffer, { traces: [] }, { traces: [] });
+
+      const batch = readBatch(buffer);
+
+      expectTraceArrays(batch);
+      expect(batch.snapshots[0].t).toEqual([]);
+      expect(batch.jobs[0].t).toEqual([]);
+      expect(batch.truncatedSpans).toBe(0);
+    });
+
+    it.each([
+      {
+        label: "slow operations",
+        request: { duration: 1_001 },
+        job: { duration: 1_001 },
+      },
+      {
+        label: "server errors and failed jobs",
+        request: { attributes: { method: "GET", statusCode: 500 } },
+        job: { status: "failed" as const, error: { message: "job failed" } },
+      },
+      {
+        label: "errors without a status code",
+        request: {
+          protocol: "rpc",
+          attributes: {},
+          error: { message: "failed" },
+        },
+        job: { error: { message: "job failed" } },
+      },
+    ])("keeps nested trees for $label when degraded", ({ request, job }) => {
+      const buffer = createBuffer();
+      buffer.setDegraded(true);
+      insertOperations(buffer, request, job);
+
+      const batch = readBatch(buffer);
+
+      expectTraceArrays(batch);
+      expect(batch.snapshots[0].t?.[0].ch?.[0].n).toBe("Repository.read");
+      expect(batch.jobs[0].t).toEqual(batch.snapshots[0].t);
+      expect(batch).not.toHaveProperty("truncatedSpans");
+    });
+
+    it("still withholds fast HTTP client errors when degraded", () => {
+      const buffer = createBuffer();
+      buffer.setDegraded(true);
+      insertOperations(buffer, {
+        attributes: { statusCode: 499 },
+        error: { message: "client error" },
+      });
+
+      const batch = readBatch(buffer);
+
+      expectTraceArrays(batch);
+      expect(batch.snapshots[0].t).toEqual([]);
+      expect(batch.snapshots[0].e).toEqual({ message: "client error" });
+      expect(batch.truncatedSpans).toBe(4);
+    });
+
+    it.each(["cleared", "expired"])(
+      "restores subsequent request and job trees when degradation is %s",
+      (recovery) => {
+        vi.useFakeTimers();
+        const buffer = createBuffer();
+        buffer.setDegraded(true);
+        insertOperations(buffer);
+        const degraded = readBatch(buffer);
+        expectTraceArrays(degraded);
+        expect(degraded.snapshots[0].t).toEqual([]);
+        expect(degraded.jobs[0].t).toEqual([]);
+
+        buffer.resetMainThreadBuffer();
+        if (recovery === "cleared") {
+          buffer.setDegraded(false);
+        } else {
+          vi.advanceTimersByTime(DEGRADED_TTL_MS + 1);
+        }
+        insertOperations(buffer);
+        const recovered = readBatch(buffer);
+
+        expectTraceArrays(recovered);
+        expect(recovered.snapshots[0].t?.[0].ch?.[0].n).toBe("Repository.read");
+        expect(recovered.jobs[0].t).toEqual(recovered.snapshots[0].t);
+        expect(recovered).not.toHaveProperty("truncatedSpans");
+      },
+    );
+
+    it("keeps trace arrays and labeled metrics when repairing an unrelated field", () => {
+      const buffer = createBuffer();
+      buffer.setDegraded(true);
+      insertOperations(buffer);
+      const counter = new Counter("task.runs", "Runs", ["result"]);
+      counter.increment({ result: "completed" }, 3);
+      const gauge = new Gauge("task.pending", { labels: ["queue"] });
+      gauge.increment({ queue: "cron" }, 0);
+      gauge.setValue({ queue: "cron" }, 2);
+      const summary = new Summary("task.duration", { labels: ["cron"] });
+      summary.observe(42, "cron");
+      for (const metric of [counter, gauge, summary]) {
+        buffer.upsertCustomMetric(metric);
+      }
+      const batch = readBatch(buffer);
+      const expectedMetrics = structuredClone(batch.custom);
+      expect(batch.custom).toHaveLength(3);
+      expect(batch.custom?.map((metric) => metric.l)).toEqual([
+        ["result"],
+        ["queue"],
+        ["cron"],
+      ]);
+      batch.jobs[0].st = 123;
+      // The worker rebuilds the sanitizer from source without module scope.
+      const workerSanitizer = new Function(
+        `return (${createTelemetrySanitizer.toString()})`,
+      )()(SECTION_SHAPES);
+
+      const result = workerSanitizer.sanitizeBatch(batch);
+
+      expect(result.changed).toBe(true);
+      expect(result.dropped).toBe(0);
+      expect(batch.jobs[0]).not.toHaveProperty("st");
+      expect(batch.custom).toEqual(expectedMetrics);
+      expectTraceArrays(batch);
+      expect(batch.snapshots[0].t).toEqual([]);
+      expect(batch.jobs[0].t).toEqual([]);
+      // `truncatedSpans` is not declared by the local batch contract.
+      const { truncatedSpans, ...contractBatch } = batch;
+      expect(truncatedSpans).toBe(4);
+      expect(
+        validateTelemetryPayload(contractBatch, { forbidUnknown: true }),
+      ).toEqual([]);
+    });
+  });
+
   describe("empty state", () => {
     it("starts empty", () => {
       expect(createBuffer().isBufferEmpty()).toBe(true);

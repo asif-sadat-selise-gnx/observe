@@ -268,7 +268,7 @@ export class ObserveAgentSharedBuffer {
       // are built from, and those are still being kept - and the count goes
       // with it, because it is the only record these existed.
       this.countTruncated(encodedSnapshot.t);
-      delete encodedSnapshot.t;
+      encodedSnapshot.t = [];
     }
     this._mainThreadBuffer.snapshots.push(encodedSnapshot);
 
@@ -318,7 +318,7 @@ export class ObserveAgentSharedBuffer {
       // A job carries no status code, so the same rule grades it on its error
       // and its duration - which is what the collector does with it too.
       this.countTruncated(encodedJobSnapshot.t);
-      delete encodedJobSnapshot.t;
+      encodedJobSnapshot.t = [];
     }
     this._mainThreadBuffer.jobs.push(encodedJobSnapshot);
   }
