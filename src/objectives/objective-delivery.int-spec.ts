@@ -469,7 +469,8 @@ describe("@Objective: while the collector is withholding span trees", () => {
 
     const snapshot = batch.snapshots!.find((s) => s.ti === traceId);
     expect(snapshot).toBeDefined();
-    expect(snapshot).not.toHaveProperty("t");
+    expect(Array.isArray(snapshot!.t)).toBe(true);
+    expect(snapshot!.t).toEqual([]);
     expect(batch.truncatedSpans).toBeGreaterThan(0);
     expect(batch.objectives).toEqual([
       {
