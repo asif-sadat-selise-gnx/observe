@@ -374,6 +374,21 @@ export class ObserveAgentSharedBuffer {
   }
 
   /**
+   * Whether a batch written by `encodeAndWrite` is still in the shared slot -
+   * not yet taken by the worker, or taken and still being sent.
+   *
+   * The worker holds the lock from reading the slot until the collector has
+   * answered (or the send has failed), and zeroes the length just before it
+   * lets go, on every path. So a non-zero length means the worker is not done
+   * with the last batch, which is what a shutdown waits on before writing
+   * another one or terminating the thread. Read without the lock: a stale
+   * answer only costs the caller one more look.
+   */
+  hasBatchAwaitingWorker() {
+    return new DataView(this._sharedBuffer, 4, 4).getUint32(0) !== 0;
+  }
+
+  /**
    * Takes the lock, or reports that someone else holds it.
    *
    * One `compareExchange` rather than a read followed by a write: the worker

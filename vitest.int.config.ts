@@ -16,5 +16,8 @@ export default defineConfig({
     pool: "forks",
     fileParallelism: false,
     maxWorkers: 1,
+    // Keeps batches sent to the default endpoint on this machine - see the
+    // file for why that matters now that the agent flushes on shutdown.
+    globalSetup: ["./vitest.int.global-setup.ts"],
   },
 });

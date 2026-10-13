@@ -35,6 +35,27 @@ const DEFAULT_COLLECTOR_ENDPOINT =
 const MIN_FLUSH_INTERVAL = 1000; // 1 second
 
 /**
+ * How long shutdown waits for buffered telemetry to reach the collector before
+ * terminating the worker anyway.
+ *
+ * Several times a healthy round trip to the hosted collector - gzip, a POST,
+ * a few-hundred-byte reply, a fresh TLS handshake if the kept-alive socket has
+ * gone - and well inside the grace period an orchestrator gives a process
+ * after SIGTERM (30 s on ECS and Kubernetes by default), which also has to
+ * cover the application's own shutdown hooks. The worker's request carries no
+ * timeout of its own, so this is the only thing standing between a collector
+ * that never answers and a shutdown that never finishes.
+ */
+const FINAL_FLUSH_TIMEOUT_MS = 2000;
+
+/**
+ * How often the final flush looks at the shared slot while the worker is
+ * sending. The worker itself polls the slot every 50 ms when idle, so looking
+ * more often than this adds nothing.
+ */
+const FINAL_FLUSH_POLL_MS = 10;
+
+/**
  * The credentials `nest new --observe` writes into `AppModule`.
  *
  * A project fresh from the generator has these until someone signs up, so
@@ -213,13 +234,35 @@ export class ObserveAgentWorker implements OnModuleInit, OnApplicationShutdown {
     this.logger.log("Continuous profiling enabled.");
   }
 
+  /**
+   * Sends what is still buffered, then stops the worker.
+   *
+   * Runs in `onApplicationShutdown` rather than `beforeApplicationShutdown`
+   * on purpose. Nest closes an application as destroy hooks, then
+   * before-shutdown hooks, then the HTTP server (letting in-flight requests
+   * finish, and record their snapshots), then shutdown hooks - so this is the
+   * last point at which anything is still being recorded. It also runs after
+   * the application's own shutdown hooks: Nest calls them in ascending module
+   * distance, global modules last, and ObserveModule is global by default (and
+   * imported by the modules it observes when it is not). Within this module it runs
+   * before `NodeRuntimeMetricsService` stops its monitors, because this class
+   * depends on it.
+   *
+   * Anything recorded after the final flush - by another global module whose
+   * hook happens to run later - stays in the main-thread buffer and is not
+   * sent: the flush timer is gone and nothing will come back for it.
+   */
   async onApplicationShutdown() {
     if (this.flushInterval) {
       clearInterval(this.flushInterval);
     }
 
+    // Remembered rather than re-read: the interval is cleared here, but the
+    // final flush still takes one last sample if it was running.
+    const runtimeMetricsEnabled = this.runtimeMetricsInterval !== null;
     if (this.runtimeMetricsInterval) {
       clearInterval(this.runtimeMetricsInterval);
+      this.runtimeMetricsInterval = null;
     }
 
     if (this.cpuProfiler) {
@@ -228,17 +271,139 @@ export class ObserveAgentWorker implements OnModuleInit, OnApplicationShutdown {
       this.cpuProfiler = null;
     }
 
+    // No worker - scaffold credentials, or never started - means nothing was
+    // ever going to be sent, so there is nothing to flush either.
     if (!this.worker) {
       return;
     }
 
+    // Set before the final flush rather than just before `terminate`: a worker
+    // that dies while draining must not be replaced by one nothing will stop.
     this.isTerminating = true;
+
+    try {
+      await this.flushBeforeShutdown(this.worker, runtimeMetricsEnabled);
+    } catch (error) {
+      // `flush` reports its own failures; this is anything else, and a
+      // shutdown hook that throws would only trade lost telemetry for a
+      // shutdown that does not finish cleanly.
+      if (this.options.debug) {
+        this.logger.debug(
+          `Final flush before shutdown failed: ${String(error)}`,
+        );
+      }
+    }
+
     await this.worker.terminate();
 
     if (this.options.debug) {
       this.logger.debug("Worker terminated successfully.");
     }
     this.worker = null;
+  }
+
+  /**
+   * Hands everything still buffered to the worker and waits for it to be
+   * sent, for at most `FINAL_FLUSH_TIMEOUT_MS`.
+   *
+   * Telemetry sits in up to three places at shutdown: the main-thread batch
+   * (plus log lines held back for later batches), the shared slot, and the
+   * worker's in-flight request - the worker keeps the slot locked and filled
+   * until the collector has answered. The slot holds one batch, and a plain
+   * `flush()` skips while the worker holds it, so this is a loop: wait for the
+   * slot to empty, write the next batch, repeat until there is nothing left to
+   * write and the worker is done with the last one. Waiting for an empty slot
+   * before each write is also what stops the final flush overwriting a batch
+   * the worker has not read yet.
+   *
+   * Never throws for a send: a refused or failed batch is reported by the
+   * worker as it always is, and clears the slot like a sent one.
+   */
+  private async flushBeforeShutdown(
+    worker: Worker,
+    sampleRuntimeMetrics: boolean,
+  ): Promise<void> {
+    const buffer = this.observeAgentSharedBuffer;
+    const deadline = Date.now() + FINAL_FLUSH_TIMEOUT_MS;
+
+    // A worker that dies mid-drain will never empty the slot; there is no
+    // point waiting out the deadline for it.
+    let exited = false;
+    const onExit = () => {
+      exited = true;
+    };
+    worker.once("exit", onExit);
+
+    try {
+      // Every protocol records its snapshot from a `setTimeout(0)` after the
+      // response or job has finished, so the last requests a process served
+      // may not be in the buffer yet - and an empty buffer would end this
+      // before they land. A zero timer set now fires after the ones already
+      // queued, and the microtasks each of those starts run before it does.
+      // A trace whose spans were still open waits a further second in the
+      // registry before it is recorded; that one this does not wait for.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      for (;;) {
+        if (exited) {
+          if (this.options.debug) {
+            this.logger.debug(
+              "Worker exited before the final flush completed. Telemetry still buffered was not sent.",
+            );
+          }
+          return;
+        }
+
+        if (!buffer.hasBatchAwaitingWorker()) {
+          this.flush();
+
+          if (!buffer.hasBatchAwaitingWorker() && buffer.isBufferEmpty()) {
+            if (!sampleRuntimeMetrics) {
+              return;
+            }
+            // Taken only now that whatever was already buffered has gone: a
+            // batch carries a single runtime sample, and each sample covers the
+            // window since the previous one, so taking this earlier could
+            // replace an unsent sample and lose its window.
+            sampleRuntimeMetrics = false;
+            this.addFinalRuntimeMetrics();
+            continue;
+          }
+        }
+
+        if (Date.now() >= deadline) {
+          if (this.options.debug) {
+            this.logger.debug(
+              `Final flush did not complete within ${FINAL_FLUSH_TIMEOUT_MS}ms. Telemetry still buffered was not sent.`,
+            );
+          }
+          return;
+        }
+
+        await new Promise((resolve) =>
+          setTimeout(resolve, FINAL_FLUSH_POLL_MS),
+        );
+      }
+    } finally {
+      worker.off("exit", onExit);
+    }
+  }
+
+  /**
+   * The runtime-metrics window between the last scheduled sample and now.
+   */
+  private addFinalRuntimeMetrics() {
+    try {
+      this.observeAgentSharedBuffer.addNodeRuntimeMetrics(
+        this.nodeRuntimeMetricsService.collectNodeRuntimeMetrics(),
+      );
+    } catch (error) {
+      if (this.options.debug) {
+        this.logger.debug(
+          `Could not collect final runtime metrics: ${String(error)}`,
+        );
+      }
+    }
   }
 
   private get hasScaffoldCredentials(): boolean {
