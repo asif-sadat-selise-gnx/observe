@@ -20,6 +20,7 @@ import {
 import { NodeRuntimeMetricsService } from "../services/node-runtime-metrics.service.js";
 import { OperationTraceRegistry } from "../services/operation-trace.registry.js";
 import {
+  IngestMode,
   parseDegradedMessage,
   parsePausedMessage,
 } from "./degraded-ingest.protocol.js";
@@ -601,9 +602,9 @@ export class ObserveAgentWorker implements OnModuleInit, OnApplicationShutdown {
       return;
     }
 
-    const degraded = parseDegradedMessage(msg);
-    if (degraded !== null) {
-      this.applyDegraded(degraded);
+    const mode = parseDegradedMessage(msg);
+    if (mode !== null) {
+      this.applyIngestMode(mode);
       return;
     }
 
@@ -618,36 +619,47 @@ export class ObserveAgentWorker implements OnModuleInit, OnApplicationShutdown {
   }
 
   /**
-   * Whether the last reply said the collector is discarding spans.
+   * What the last reply said the collector does with spans.
    *
    * Kept beside the log rather than read from the buffer so the notice fires
    * once per transition: an account sits in this state for days, and a line
    * per flush would bury the one thing worth reading.
    */
-  private reportedDegraded = false;
+  private reportedMode: IngestMode = "full";
 
   /**
    * Stops sending trace trees the collector has told us it is throwing away,
-   * and says so once.
+   * and says so once - and again only when the reason changes.
    *
    * Said at `warn` rather than `debug`: the application is still being
-   * observed, the waterfalls are not being kept, and a developer who finds
+   * observed, most waterfalls are not being kept, and a developer who finds
    * that out by opening a trace and seeing nothing has been let down by an
-   * agent that knew.
+   * agent that knew. Each line says what is still kept, because the traces
+   * worth opening - server errors, slow requests, failed jobs - still are.
    */
-  private applyDegraded(degraded: boolean) {
-    this.observeAgentSharedBuffer.setDegraded(degraded);
+  private applyIngestMode(mode: IngestMode) {
+    // Reduced and trimmed withhold the same trees; only the notice differs.
+    this.observeAgentSharedBuffer.setDegraded(mode !== "full");
 
-    if (degraded && !this.reportedDegraded) {
+    if (mode === this.reportedMode) {
+      return;
+    }
+    if (mode === "reduced") {
       this.logger.warn(
-        "Observe: this account has spent its monthly event allowance. Requests, jobs " +
-          "and errors are still being recorded; spans are not, so traces will show no " +
-          "waterfall. The agent has stopped sending them. See /dashboard/billing.",
+        "Observe: this account has used its monthly allowance, so most traces now arrive without their spans. " +
+          "Requests, jobs and errors are still recorded, and server errors, slow requests and failed jobs keep their full traces. " +
+          "See /dashboard/billing/usage.",
       );
-    } else if (!degraded && this.reportedDegraded) {
+    } else if (mode === "trimmed") {
+      this.logger.warn(
+        "Observe: traces are now trimmed past this account's threshold to keep its bill down. " +
+          "Requests, jobs and errors are still recorded, and server errors, slow requests and failed jobs keep their full traces. " +
+          'To keep every trace, turn on "Keep full traces" at /dashboard/billing/usage.',
+      );
+    } else {
       this.logger.log("Observe: spans are being recorded again.");
     }
-    this.reportedDegraded = degraded;
+    this.reportedMode = mode;
   }
 
   handleError(error: Error) {

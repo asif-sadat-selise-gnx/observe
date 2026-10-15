@@ -6,8 +6,24 @@
  * is already strings - every other line it posts is human-readable prose the
  * parent logs - and a second message shape would have to be threaded through
  * the same handler anyway. Parsed in exactly one place on each side.
+ *
+ * The value after it is `false`, `true`, or `trimmed` - see `IngestMode`.
  */
 export const DEGRADED_MESSAGE_PREFIX = "observe:degraded=";
+
+/**
+ * What the collector said it does with a batch's spans.
+ *
+ * - `full`: keeps them all.
+ * - `reduced`: the account has used its monthly allowance - Free's reduced
+ *   ingest - and only notable traces keep their spans.
+ * - `trimmed`: a paying account past its threshold has its traces trimmed by
+ *   the same rule, to keep its bill down.
+ *
+ * Both of the last two withhold exactly the same trees; they differ only in
+ * why, which is what the operator is told and what they can do about it.
+ */
+export type IngestMode = "full" | "reduced" | "trimmed";
 
 /**
  * How long the main thread keeps withholding spans after the last batch that
@@ -21,12 +37,25 @@ export const DEGRADED_MESSAGE_PREFIX = "observe:degraded=";
  */
 export const DEGRADED_TTL_MS = 5 * 60 * 1000;
 
-/** The worker's line for one batch, or null if this is not that line. */
-export function parseDegradedMessage(msg: string): boolean | null {
+/**
+ * The worker's line for one batch, or null if this is not that line.
+ *
+ * `true` and `false` are what the line has always carried, and they mean what
+ * they always did; `trimmed` is the one addition. Anything else reads as
+ * `full`, as every value but `true` always has.
+ */
+export function parseDegradedMessage(msg: string): IngestMode | null {
   if (!msg.startsWith(DEGRADED_MESSAGE_PREFIX)) {
     return null;
   }
-  return msg.slice(DEGRADED_MESSAGE_PREFIX.length) === "true";
+  switch (msg.slice(DEGRADED_MESSAGE_PREFIX.length)) {
+    case "true":
+      return "reduced";
+    case "trimmed":
+      return "trimmed";
+    default:
+      return "full";
+  }
 }
 
 /**

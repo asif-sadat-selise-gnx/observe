@@ -10,8 +10,28 @@ import {
 
 describe("the degraded-ingest protocol", () => {
   it("reads the worker's verdict for a batch", () => {
-    expect(parseDegradedMessage(`${DEGRADED_MESSAGE_PREFIX}true`)).toBe(true);
-    expect(parseDegradedMessage(`${DEGRADED_MESSAGE_PREFIX}false`)).toBe(false);
+    // The two values the line carried before trimming existed, meaning what
+    // they always meant: `true` is an account out of its allowance.
+    expect(parseDegradedMessage(`${DEGRADED_MESSAGE_PREFIX}true`)).toBe(
+      "reduced",
+    );
+    expect(parseDegradedMessage(`${DEGRADED_MESSAGE_PREFIX}false`)).toBe(
+      "full",
+    );
+  });
+
+  it("tells a paying account's trimmed traces apart from a spent allowance", () => {
+    expect(parseDegradedMessage(`${DEGRADED_MESSAGE_PREFIX}trimmed`)).toBe(
+      "trimmed",
+    );
+  });
+
+  it("reads any other value as full ingest, as it always has", () => {
+    // Withholding spans on a value nobody defined would lose waterfalls the
+    // collector was still keeping, silently.
+    expect(parseDegradedMessage(DEGRADED_MESSAGE_PREFIX)).toBe("full");
+    expect(parseDegradedMessage(`${DEGRADED_MESSAGE_PREFIX}TRUE`)).toBe("full");
+    expect(parseDegradedMessage(`${DEGRADED_MESSAGE_PREFIX}trim`)).toBe("full");
   });
 
   it("ignores every other line the worker posts", () => {
