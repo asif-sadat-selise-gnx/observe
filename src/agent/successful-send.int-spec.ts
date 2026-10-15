@@ -48,7 +48,7 @@ class AppModule {}
 
 let app: INestApplication;
 
-const DEGRADED_NOTICE = "monthly event allowance";
+const DEGRADED_NOTICE = "has used its monthly allowance";
 
 beforeAll(async () => {
   // Answers exactly as the real collector does for an account past its event
