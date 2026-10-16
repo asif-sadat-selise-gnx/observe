@@ -1,3 +1,4 @@
+import { Reflector } from "@nestjs/core";
 import { AsyncLocalStorage } from "async_hooks";
 import { OperationTraceRegistry } from "../services/operation-trace.registry.js";
 import { KeyOf } from "../types/key-of.type.js";
@@ -17,6 +18,35 @@ const STANDALONE_FUNCTION_LABEL = "Function";
 const FALLBACK_CLASS_NAME = "Object";
 
 type AnyFunction = (...args: any[]) => any;
+
+/**
+ * Whether an instance is a framework provider that is never instrumented,
+ * whatever `skipInstrumentation` says.
+ *
+ * Nest's `Reflector` is the one: guards, interceptors and pipes ask it whether
+ * a route is public, throttled or role-gated several times a request, each
+ * answer a hundredth of a millisecond, and a waterfall full of those answers
+ * explains nothing - while every one of them is a billed span. On one app it
+ * was 18 spans in every request, 29% of all it sent. The collector drops what
+ * older agents still send; this stops them being made.
+ *
+ * Matched by shape as well as by class: an application with a second copy of
+ * `@nestjs/core` in its tree has a second `Reflector` class, which the
+ * `instanceof` alone would miss.
+ */
+function isFrameworkNoise(instance: object): boolean {
+  if (instance instanceof Reflector) {
+    return true;
+  }
+  const candidate = instance as {
+    constructor?: { name?: unknown };
+    getAllAndOverride?: unknown;
+  };
+  return (
+    candidate.constructor?.name === "Reflector" &&
+    typeof candidate.getAllAndOverride === "function"
+  );
+}
 
 interface TracedCallSpec {
   /**
@@ -251,6 +281,11 @@ export function createInstanceDecorator<T extends Record<string, unknown>>(
     let slotBacked: boolean;
     let bareBuiltIn: boolean;
     try {
+      // Inspected here, inside the guard, for the same reason as the checks
+      // below: reading a provider's constructor can run a trap that throws.
+      if (isFrameworkNoise(instance)) {
+        return instance;
+      }
       hasPrivateMembers = usesNativePrivateMembers(instance);
       slotBacked = isSlotBackedBuiltIn(instance);
       bareBuiltIn = slotBacked && isNativeFunction(instance.constructor);

@@ -1,3 +1,4 @@
+import { Reflector } from "@nestjs/core";
 import { AsyncLocalStorage } from "async_hooks";
 import { EventEmitter } from "events";
 import { OperationTraceRegistry } from "../services/operation-trace.registry.js";
@@ -434,6 +435,45 @@ describe("createInstanceDecorator", () => {
 
       expect(startedSteps).toEqual([
         { className: "UserService", methodName: "findAll" },
+      ]);
+    });
+
+    it("never instruments Nest's Reflector", () => {
+      // Metadata lookups: several a request, and nothing a waterfall is for.
+      const reflector = new Reflector();
+      expect(decorate(reflector)).toBe(reflector);
+
+      // A second copy of @nestjs/core has its own class; the shape still
+      // gives it away.
+      class Reflector2 {
+        getAllAndOverride() {
+          return undefined;
+        }
+      }
+      Object.defineProperty(Reflector2, "name", { value: "Reflector" });
+      const copy = new Reflector2();
+      expect(decorate(copy)).toBe(copy);
+
+      withTrace(() => {
+        reflector.get("roles", UserService);
+        copy.getAllAndOverride();
+      });
+      expect(startedSteps).toEqual([]);
+    });
+
+    it("still instruments a provider that is only called Reflector", () => {
+      // The name alone is not enough: an application's own class is traced.
+      class Reflector2 {
+        reflect() {
+          return "mirror";
+        }
+      }
+      Object.defineProperty(Reflector2, "name", { value: "Reflector" });
+      const own = decorate(new Reflector2()) as Reflector2;
+
+      withTrace(() => own.reflect());
+      expect(startedSteps).toEqual([
+        { className: "Reflector", methodName: "reflect" },
       ]);
     });
 

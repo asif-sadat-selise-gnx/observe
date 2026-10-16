@@ -91,6 +91,10 @@ export interface CreateObserveModuleOptions {
    * should stay untouched - no proxy is placed around it and none of its
    * methods produce spans.
    *
+   * Nest's own `Reflector` is never instrumented, whatever this returns: its
+   * metadata lookups run several times a request and say nothing a
+   * waterfall is for.
+   *
    * Runs before the built-in checks, so it also shields providers that
    * cannot even be inspected safely: some libraries (nestjs-cls proxy
    * providers, for instance) register proxies that throw on any property
