@@ -8,6 +8,7 @@ import {
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   DEGRADED_MESSAGE_PREFIX,
+  IngestMode,
   parseDegradedMessage,
 } from "./degraded-ingest.protocol.js";
 import {
@@ -34,14 +35,19 @@ const bufferWithBatch = (json: string) => {
  * module scope, and a copy would pass whatever the real assembly forgot. An
  * `Error:` from the worker fails the wait - an accepted batch is not one.
  */
-const verdictFor = async (endpoint: string) => {
+const verdictFor = async (
+  endpoint: string,
+  credentials: { appKey?: string; appSecret?: string } = {
+    appKey: "k",
+    appSecret: "s",
+  },
+) => {
   const worker = new Worker(detachedWorkerSource(), {
     eval: true,
     workerData: detachedWorkerData({
       sharedBuffer: bufferWithBatch(JSON.stringify({ traces: [] })),
       endpoint,
-      appKey: "k",
-      appSecret: "s",
+      ...credentials,
     }),
   });
 
@@ -153,6 +159,43 @@ describe("what the detached worker makes of an accepted batch's reply", () => {
 
       expect(verdict).toBe(`${DEGRADED_MESSAGE_PREFIX}${value}`);
       expect(parseDegradedMessage(verdict)).toBe(mode);
+    },
+    20_000,
+  );
+
+  /**
+   * Every mode but `full`, named as `IngestMode` names them. A Record, so a
+   * mode added there and not here fails to compile - and once added here, the
+   * case below fails until the worker announces it too.
+   */
+  const readableModes: Record<Exclude<IngestMode, "full">, true> = {
+    reduced: true,
+    trimmed: true,
+    paced: true,
+  };
+
+  it.each([
+    ["with credentials", { appKey: "k", appSecret: "s" }],
+    // A collector in placeholder mode takes unauthenticated batches and
+    // answers them by the same rules, so they need the header just as much.
+    ["without credentials", { appKey: undefined, appSecret: undefined }],
+  ])(
+    "lists the ingest modes it can read on a batch sent %s",
+    async (_label, credentials) => {
+      let received: IncomingMessage["headers"] | undefined;
+      respond = (req, res) => {
+        received = req.headers;
+        acceptWith({ degraded: false })(req, res);
+      };
+
+      await verdictFor(endpoint, credentials);
+
+      // The collector answers `paced` only to an agent that lists it here,
+      // and answers the rest of a paced account's batches as undegraded.
+      expect(received?.["x-observe-ingest-modes"]).toBe(
+        Object.keys(readableModes).join(", "),
+      );
+      expect(received?.["x-api-key"]).toBe(credentials.appKey);
     },
     20_000,
   );
