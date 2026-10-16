@@ -48,6 +48,7 @@ const verdictFor = async (
       sharedBuffer: bufferWithBatch(JSON.stringify({ traces: [] })),
       endpoint,
       ...credentials,
+      flushInterval: 5000,
     }),
   });
 

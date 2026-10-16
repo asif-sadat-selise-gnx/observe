@@ -44,6 +44,7 @@ const firstReport = async (
       endpoint,
       appKey: "k",
       appSecret: "s",
+      flushInterval: 5000,
     }),
   });
 
@@ -187,5 +188,27 @@ describe("how the detached worker reports its own failures", () => {
     expect(report).toContain("rate-limited (429)");
     expect(report).toContain("12 of 10 included events used on the hobby plan");
     expect(report).toContain("Pausing sends for 1 minute(s)");
+  }, 20_000);
+
+  it("explains a 429 for credentials already rejected as a credentials problem", async () => {
+    // What the collector answers a credential it has refused before: a 429,
+    // so that every agent since 0.1.5 pauses, for the hour it asks.
+    respond = answer(
+      429,
+      {
+        statusCode: 429,
+        code: "CREDENTIALS_REJECTED",
+        message: "Invalid API key or secret",
+      },
+      { "retry-after": "3600" },
+    );
+
+    const report = await firstReport(detachedWorkerSource(), endpoint);
+
+    expect(report).toContain("rate-limited (429)");
+    expect(report).toContain("appKey and appSecret were rejected");
+    expect(report).toContain("restart the process");
+    expect(report).toContain("Pausing sends for 60 minute(s)");
+    expect(report).not.toContain("out of credits");
   }, 20_000);
 });

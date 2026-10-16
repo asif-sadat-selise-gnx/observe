@@ -160,7 +160,10 @@ export interface ObserveOptions {
    *
    * Sent as `x-api-key` on every ingest request, alongside `appSecret`.
    * Without valid credentials the collector answers 401 and the batch is
-   * dropped.
+   * dropped; the agent then backs off, to one attempt an hour, until a
+   * restart picks up fixed credentials. With this or `appSecret` unset,
+   * nothing is sent to the hosted collector at all - a warning at startup
+   * says so - while a collector of your own still receives the batches.
    */
   appKey: string;
 

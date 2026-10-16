@@ -32,6 +32,7 @@ export function detachedWorkerData(input: {
   endpoint: string;
   appKey?: string;
   appSecret?: string;
+  flushInterval: number;
 }): DetachedWorkerData {
   // Spelled out against the interface rather than spread, so a key the worker
   // starts reading is a compile error here until it is supplied.
@@ -39,6 +40,7 @@ export function detachedWorkerData(input: {
     endpoint: input.endpoint,
     appKey: input.appKey,
     appSecret: input.appSecret,
+    flushInterval: input.flushInterval,
     wireShapes: SECTION_SHAPES,
     degradedPrefix: DEGRADED_MESSAGE_PREFIX,
     pausedPrefix: PAUSED_MESSAGE_PREFIX,

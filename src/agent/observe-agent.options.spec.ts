@@ -36,7 +36,14 @@ describe("ObserveAgentWorker options", () => {
   const build = (options: Partial<ObserveModuleOptionsWithDefaults>) => {
     worker = new ObserveAgentWorker(
       sharedBuffer as never,
-      { serviceId: "svc", ...options } as ObserveModuleOptionsWithDefaults,
+      // With credentials, as the agent always runs: without them it starts
+      // nothing against the hosted collector - see the cases at the end.
+      {
+        serviceId: "svc",
+        appKey: "k",
+        appSecret: "s",
+        ...options,
+      } as ObserveModuleOptionsWithDefaults,
       metrics as never,
     );
     // The worker thread and the profiler are out of scope here; only the
@@ -107,6 +114,29 @@ describe("ObserveAgentWorker options", () => {
 
       vi.advanceTimersByTime(1);
       expect(flush).toHaveBeenCalledTimes(1);
+    });
+
+    it("settles the interval before the worker starts, which backs off from it", () => {
+      // The worker's first pause after rejected credentials is one flush
+      // interval, read when it starts - so the clamp has to come first, or a
+      // `flushInterval: 50` would back off from 50ms.
+      vi.useFakeTimers();
+      build({ flushInterval: 50 });
+      let seenAtStart: number | undefined;
+      vi.mocked(worker.initializeWorker).mockImplementation(() => {
+        seenAtStart = (
+          worker as unknown as { options: { flushInterval?: number } }
+        ).options.flushInterval;
+      });
+      vi.spyOn(
+        (worker as unknown as { logger: { warn: (m: string) => void } }).logger,
+        "warn",
+      ).mockImplementation(() => undefined);
+
+      worker.onModuleInit();
+
+      expect(worker.initializeWorker).toHaveBeenCalledTimes(1);
+      expect(seenAtStart).toBe(1000);
     });
 
     it("defaults to five seconds when the option is not set", () => {
@@ -242,6 +272,92 @@ describe("ObserveAgentWorker options", () => {
 
       expect(worker.initializeWorker).toHaveBeenCalled();
       expect(log).not.toHaveBeenCalled();
+    });
+  });
+
+  // A deployment whose environment never reached the process: the worker
+  // leaves both headers off, which a collector in placeholder mode accepts,
+  // and which the hosted collector answers with a 401 for as long as the
+  // process runs - 42% of the 1.87M batches it refused on 2026-10-15.
+  describe("without credentials", () => {
+    const HOSTED = "https://observe-api.nestjs.com";
+    const none = { appKey: undefined, appSecret: undefined };
+
+    const spyLogger = () => {
+      const logger = (
+        worker as unknown as {
+          logger: {
+            log: (m: string) => void;
+            warn: (m: string) => void;
+            error: (m: string) => void;
+          };
+        }
+      ).logger;
+      return {
+        log: vi.spyOn(logger, "log").mockImplementation(() => undefined),
+        warn: vi.spyOn(logger, "warn").mockImplementation(() => undefined),
+        error: vi.spyOn(logger, "error").mockImplementation(() => undefined),
+      };
+    };
+
+    it("starts nothing against the hosted collector and says why, once", () => {
+      build({ ...none, endpoint: HOSTED, runtimeMetrics: true });
+      const { warn, error } = spyLogger();
+      worker.onModuleInit();
+
+      expect(worker.initializeWorker).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("appKey and appSecret are not set"),
+      );
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("https://observe.nestjs.com"),
+      );
+      // Not an error: the application is fine, it is only not observed.
+      expect(error).not.toHaveBeenCalled();
+      // Nobody would receive the samples.
+      expect(runtimeMetricsStarted()).toBe(false);
+    });
+
+    it.each([
+      ["appKey", { appKey: undefined, appSecret: "s" }, "appKey is not set"],
+      [
+        "appSecret",
+        { appKey: "k", appSecret: undefined },
+        "appSecret is not set",
+      ],
+      ["an empty appKey", { appKey: "", appSecret: "s" }, "appKey is not set"],
+    ])("names what is missing: %s", (_, credentials, named) => {
+      build({ ...credentials, endpoint: HOSTED });
+      const { warn } = spyLogger();
+      worker.onModuleInit();
+
+      expect(worker.initializeWorker).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining(named));
+    });
+
+    it("knows the hosted collector however its URL is written", () => {
+      build({ ...none, endpoint: "https://OBSERVE-API.nestjs.com/" });
+      spyLogger();
+      worker.onModuleInit();
+
+      expect(worker.initializeWorker).not.toHaveBeenCalled();
+    });
+
+    it("empties the buffer on flush without handing anything off", () => {
+      build({ ...none, endpoint: HOSTED }).flush();
+
+      expect(sharedBuffer.resetMainThreadBuffer).toHaveBeenCalled();
+      expect(sharedBuffer.encodeAndWrite).not.toHaveBeenCalled();
+    });
+
+    it("still sends to a collector of the user's own, which may take batches without them", () => {
+      build({ ...none, endpoint: "http://127.0.0.1:4000" });
+      const { warn } = spyLogger();
+      worker.onModuleInit();
+
+      expect(worker.initializeWorker).toHaveBeenCalled();
+      expect(warn).not.toHaveBeenCalled();
     });
   });
 });
