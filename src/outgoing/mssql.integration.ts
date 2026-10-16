@@ -7,14 +7,21 @@ interface MssqlModule {
   Request?: { prototype?: object };
 }
 
-function describeMssqlStatement(sql: string) {
+interface MssqlRequest extends EventEmitter {
+  parent?: {
+    config?: { options?: { enableQuotedIdentifier?: boolean | null } };
+  };
+}
+
+function describeMssqlStatement(sql: string, enableQuotedIdentifier: boolean) {
   const input = sql.slice(0, 8192);
   let text = "";
   // T-SQL escapes quotes by doubling them, not with backslashes. Tokenizing
   // first keeps comment markers inside strings and identifiers inert.
+  // Double quotes follow connection options; SQL SET overrides are not tracked.
   // Binary literals may continue across lines after a backslash.
   const tokenPattern =
-    /(?<comment>--[^\r\n]*)|\[(?:[^\]]|\]\])*(?:\]|$)|"(?:[^"]|"")*(?:"|$)|(?<literal>N?'(?:[^']|'')*(?:'|$)|(?<![\w@])\$\s*[+-]?(?:\d+(?:\.\d*)?|\.\d+)|\b0x[\da-f]*(?:\\(?:\r\n|\r|\n)[\da-f]*)*|(?<![\w$@])-?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?(?![\w]))|[^]/giy;
+    /(?<comment>--[^\r\n]*)|\[(?:[^\]]|\]\])*(?:\]|$)|(?<quoted>"(?:[^"]|"")*(?:"|$))|(?<literal>N?'(?:[^']|'')*(?:'|$)|(?<![\w@])\$\s*[+-]?(?:\d+(?:\.\d*)?|\.\d+)|\b0x[\da-f]*(?:\\(?:\r\n|\r|\n)[\da-f]*)*|(?<![\w$@])-?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?(?![\w]))|[^]/giy;
   for (let index = 0; index < input.length; ) {
     if (input.startsWith("/*", index)) {
       let depth = 1;
@@ -38,7 +45,10 @@ function describeMssqlStatement(sql: string) {
     index = tokenPattern.lastIndex;
     if (token.groups?.comment !== undefined) {
       text += " ";
-    } else if (token.groups?.literal !== undefined) {
+    } else if (
+      token.groups?.literal !== undefined ||
+      (!enableQuotedIdentifier && token.groups?.quoted !== undefined)
+    ) {
       text += "?";
     } else {
       text += token[0];
@@ -56,13 +66,14 @@ export function patchMssql(
   recorder: OutgoingSpanRecorder,
 ): boolean {
   const wrap = (method: string) => (original: (...args: any[]) => any) =>
-    function (this: EventEmitter, ...args: any[]) {
+    function (this: MssqlRequest, ...args: any[]) {
       const [command, callback] = args;
       if (typeof command !== "string" || typeof callback !== "function") {
         return original.apply(this, args);
       }
       const { operation, statement } = describeMssqlStatement(
         method === "_execute" ? `EXEC ${command}` : command,
+        this.parent?.config?.options?.enableQuotedIdentifier !== false,
       );
       const span = recorder.open(
         "mssql",

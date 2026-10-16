@@ -421,6 +421,57 @@ describe("MSSQL statement sanitization", () => {
     expect(h.nodes[0].tags?.["db.statement"]).toBe(expected);
   });
 
+  it.each([undefined, true, false])(
+    "respects enableQuotedIdentifier=%s for pool, transaction and prepared-statement requests",
+    async (enableQuotedIdentifier) => {
+      const h = harness();
+      const pool = new mssql.ConnectionPool({
+        server: "localhost",
+        options: { enableQuotedIdentifier },
+      });
+      const transaction = new mssql.Transaction(pool);
+      const requests = [
+        new h.Request(pool),
+        new h.Request(transaction),
+        new h.Request(new mssql.PreparedStatement(pool)),
+        new h.Request(new mssql.PreparedStatement(transaction)),
+      ];
+      const quoted = enableQuotedIdentifier !== false;
+      const sql = quoted
+        ? `SELECT "o"."id" FROM "dbo"."orders" "o" WHERE "o"."note" = N'private-value'`
+        : `SELECT "private""value", "/*private-comment*/" FROM [dbo].[orders] WHERE note = N'private-value'`;
+      const statement = quoted
+        ? `SELECT "o"."id" FROM "dbo"."orders" "o" WHERE "o"."note" = ?`
+        : "SELECT ?, ? FROM [dbo].[orders] WHERE note = ?";
+      for (const request of requests) {
+        for (const method of ["query", "batch"] as const) {
+          await h.run(() => request[method](sql));
+        }
+      }
+      expect(h.nodes).toHaveLength(requests.length * 2);
+      for (const node of h.nodes) {
+        expect(node).toMatchObject({
+          operation: "SELECT dbo.orders",
+          tags: { "db.statement": statement },
+          ends: [undefined],
+        });
+      }
+    },
+  );
+
+  it.each(['SELECT "private-value', `SELECT "${"private-value".repeat(1000)}`])(
+    "redacts unterminated and truncated double-quoted strings when enableQuotedIdentifier=false: %.40s",
+    async (sql) => {
+      const h = harness();
+      const pool = new mssql.ConnectionPool({
+        server: "localhost",
+        options: { enableQuotedIdentifier: false },
+      });
+      await h.run(() => new h.Request(pool).query(sql));
+      expect(h.nodes[0].tags?.["db.statement"]).toBe("SELECT ?");
+    },
+  );
+
   it.each([
     `SELECT N'${"private-value".repeat(1000)}`,
     "SELECT 1 /* private-comment",
