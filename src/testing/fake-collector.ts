@@ -1,4 +1,9 @@
-import { createServer, Server, ServerResponse } from "node:http";
+import {
+  createServer,
+  IncomingHttpHeaders,
+  Server,
+  ServerResponse,
+} from "node:http";
 import { gunzipSync } from "node:zlib";
 import { validateTelemetryPayload } from "../agent/telemetry-wire-contract.js";
 import { freePort, waitFor } from "./observe-harness.js";
@@ -41,11 +46,24 @@ export interface ReceivedBatch {
   [key: string]: unknown;
 }
 
+/** One request as it reached the collector, whatever it carried. */
+export interface ReceivedRequest {
+  /** When it arrived, epoch ms. */
+  readonly at: number;
+  /** As Node parsed them: names lower-cased. */
+  readonly headers: IncomingHttpHeaders;
+}
+
 export interface FakeCollector {
   /** What to hand the module as `endpoint`. */
   readonly url: string;
   /** Every batch received, in order of arrival. */
   readonly batches: ReceivedBatch[];
+  /**
+   * Every request received, in order of arrival - refused ones, and ones
+   * whose body did not parse, included.
+   */
+  readonly requests: ReceivedRequest[];
   /**
    * What `validateTelemetryPayload(batch, { forbidUnknown: true })` found
    * wrong with any batch received so far - the API validates with
@@ -59,10 +77,15 @@ export interface FakeCollector {
   /** Waits for the batch carrying the snapshot with this trace id. */
   waitForTrace(traceId: string, timeoutMs?: number): Promise<ReceivedBatch>;
   /**
-   * How every later batch is answered: `200` with `{}` until changed. The
-   * batch is recorded whatever the answer - a refused one was still sent.
+   * How every later batch is answered: `200` with `{}` until changed, plus
+   * any headers given - a `Retry-After`, say. The batch is recorded whatever
+   * the answer - a refused one was still sent.
    */
-  answerWith(body: Record<string, unknown>, status?: number): void;
+  answerWith(
+    body: Record<string, unknown>,
+    status?: number,
+    headers?: Record<string, string>,
+  ): void;
   /**
    * Leaves every answer open until `release` is called. The worker holds the
    * shared buffer's lock for as long as its send is open, so while a batch
@@ -82,17 +105,26 @@ export interface FakeCollector {
  */
 export async function startFakeCollector(): Promise<FakeCollector> {
   const batches: ReceivedBatch[] = [];
+  const requests: ReceivedRequest[] = [];
   const violations: string[] = [];
-  let answer: { status: number; body: Record<string, unknown> } = {
+  let answer: {
+    status: number;
+    body: Record<string, unknown>;
+    headers: Record<string, string>;
+  } = {
     status: 200,
     body: {},
+    headers: {},
   };
   let held: Array<() => void> | null = null;
 
-  const respond = (res: ServerResponse, status: number, body: unknown) => {
+  const respond = (res: ServerResponse, reply: typeof answer) => {
     const send = () => {
-      res.writeHead(status, { "content-type": "application/json" });
-      res.end(JSON.stringify(body));
+      res.writeHead(reply.status, {
+        "content-type": "application/json",
+        ...reply.headers,
+      });
+      res.end(JSON.stringify(reply.body));
     };
     if (held) {
       held.push(send);
@@ -102,6 +134,7 @@ export async function startFakeCollector(): Promise<FakeCollector> {
   };
 
   const server: Server = createServer((req, res) => {
+    requests.push({ at: Date.now(), headers: req.headers });
     const chunks: Buffer[] = [];
     req.on("data", (chunk: Buffer) => chunks.push(chunk));
     req.on("end", () => {
@@ -119,7 +152,7 @@ export async function startFakeCollector(): Promise<FakeCollector> {
         ...errors.map((error) => `batch ${batches.length}: ${error}`),
       );
       batches.push(batch);
-      respond(res, answer.status, answer.body);
+      respond(res, answer);
     });
   });
 
@@ -137,6 +170,7 @@ export async function startFakeCollector(): Promise<FakeCollector> {
   return {
     url: `http://127.0.0.1:${port}`,
     batches,
+    requests,
     violations,
     declarations: () => batches.flatMap((batch) => batch.objectives ?? []),
     batchCarrying,
@@ -148,8 +182,8 @@ export async function startFakeCollector(): Promise<FakeCollector> {
       );
       return batchCarrying(traceId)!;
     },
-    answerWith(body, status = 200) {
-      answer = { status, body };
+    answerWith(body, status = 200, headers = {}) {
+      answer = { status, body, headers };
     },
     holdAnswers() {
       const pending: Array<() => void> = [];

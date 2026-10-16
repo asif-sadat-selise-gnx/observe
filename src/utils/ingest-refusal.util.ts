@@ -1,14 +1,17 @@
 /**
  * Explains a 429 from the collector in the operator's terms.
  *
- * The collector refuses ingest for three different reasons, and until this
+ * The collector refuses ingest for several different reasons, and until this
  * existed the agent reported all of them as "the account may be out of
  * credits or over budget" - which sent an operator whose card had been
  * declined to the pricing page, and one whose rate cap had engaged to their
  * invoices. The body tells them apart: a quota refusal carries
  * `code: "USAGE_LIMIT_REACHED"` with the plan and the counts, and a quota
- * refusal caused by a declined payment adds `reason: "payment_failed"`. A
- * rate cap, and any older collector, sends neither and gets the old sentence.
+ * refusal caused by a declined payment adds `reason: "payment_failed"`.
+ * Credentials the collector has already rejected carry
+ * `code: "CREDENTIALS_REJECTED"` - a 429 rather than another 401, so that
+ * agents which pause only on a 429 stop retrying them. A rate cap, and any
+ * older collector, sends none of these and gets the old sentence.
  *
  * Written self-contained on purpose - no imports, no module-scope constants -
  * because the telemetry worker is a stringified function and this travels
@@ -23,6 +26,13 @@ export const describeIngestRefusal = (body: unknown): string => {
     body !== null && typeof body === "object"
       ? (body as Record<string, unknown>)
       : {};
+
+  if (detail.code === "CREDENTIALS_REJECTED") {
+    // Nothing to do with the account's usage: the credentials are wrong and
+    // the process reads them once, so the fix is valid ones and a restart.
+    // The pause that follows only stops the agent asking in the meantime.
+    return "appKey and appSecret were rejected; check that both are valid for this application, then restart the process, which reads them once at start-up";
+  }
 
   if (detail.code !== "USAGE_LIMIT_REACHED") {
     return "the account may be out of credits or over budget";

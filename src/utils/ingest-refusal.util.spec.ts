@@ -36,6 +36,26 @@ describe("describeIngestRefusal", () => {
     expect(message).not.toContain("declined");
   });
 
+  it("sends rejected credentials to the credentials, not the account", () => {
+    // What the collector answers a credential it has already refused once,
+    // with Retry-After: 3600, so that agents which only pause on a 429 stop
+    // retrying it every flush.
+    const message = describeIngestRefusal({
+      statusCode: 429,
+      code: "CREDENTIALS_REJECTED",
+      message: "Invalid API key or secret",
+    });
+
+    // The fix is valid credentials and a restart. The account's usage has
+    // nothing to do with it, and an operator sent to the billing page would
+    // find nothing wrong there.
+    expect(message).toBe(
+      "appKey and appSecret were rejected; check that both are valid for this application, then restart the process, which reads them once at start-up",
+    );
+    expect(message).not.toContain("credits");
+    expect(message).not.toContain("upgrade");
+  });
+
   it("copes with a quota body missing the counts", () => {
     expect(describeIngestRefusal({ code: "USAGE_LIMIT_REACHED" })).toBe(
       "the account has used its included events for this period; upgrade the plan or wait for the period to reset",
@@ -65,6 +85,9 @@ describe("describeIngestRefusal", () => {
     expect(
       rehydrated({ code: "USAGE_LIMIT_REACHED", reason: "payment_failed" }),
     ).toContain("declined");
+    expect(rehydrated({ code: "CREDENTIALS_REJECTED" })).toContain(
+      "appKey and appSecret were rejected",
+    );
     expect(rehydrated(undefined)).toBe(
       "the account may be out of credits or over budget",
     );
