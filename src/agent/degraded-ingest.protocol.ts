@@ -26,6 +26,16 @@ export const DEGRADED_MESSAGE_PREFIX = "observe:degraded=";
  *
  * The last three withhold exactly the same trees; they differ only in why,
  * which is what the operator is told and what they can do about it.
+ *
+ * Every batch says which of them this agent can tell apart, in the request
+ * header `x-observe-ingest-modes: reduced, trimmed, paced` (set where the
+ * worker builds its headers, credentials or not). The collector reads only
+ * `paced`. Agents up to 0.3.11 send no header and take any `degraded: true`
+ * for a spent allowance, so a paced account's batches from them are answered
+ * `{ degraded: false }` and the collector trims the trees itself: the
+ * waterfalls are still held back, and nobody is told their month is gone. Only
+ * an agent that lists `paced` is answered `{ degraded: true, paced: true }`,
+ * and can stop sending those trees in the first place.
  */
 export type IngestMode = "full" | "reduced" | "trimmed" | "paced";
 

@@ -99,6 +99,12 @@ export const detachedObserveWorker = (
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     "Content-Encoding": "gzip",
+    // The degraded replies this agent can tell apart - see `IngestMode` in
+    // degraded-ingest.protocol.ts. A literal rather than data from `config`
+    // like the prefixes: nothing in the agent reads it back, and a missing
+    // config key would put a broken header on every batch. The value is
+    // pinned by worker-degraded-reply.spec.ts.
+    "x-observe-ingest-modes": "reduced, trimmed, paced",
   };
   // Omitted rather than sent empty when unconfigured: a collector in
   // placeholder mode accepts an unauthenticated batch, and blank credentials
