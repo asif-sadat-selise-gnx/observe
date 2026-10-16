@@ -12,8 +12,9 @@ function describeMssqlStatement(sql: string) {
   let text = "";
   // T-SQL escapes quotes by doubling them, not with backslashes. Tokenizing
   // first keeps comment markers inside strings and identifiers inert.
+  // Binary literals may continue across lines after a backslash.
   const tokenPattern =
-    /(?<comment>--[^\r\n]*)|\[(?:[^\]]|\]\])*(?:\]|$)|"(?:[^"]|"")*(?:"|$)|(?<literal>N?'(?:[^']|'')*(?:'|$)|(?<![\w@])\$\s*[+-]?(?:\d+(?:\.\d*)?|\.\d+)|\b0x[\da-f]*|(?<![\w$@])-?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?(?![\w]))|[^]/giy;
+    /(?<comment>--[^\r\n]*)|\[(?:[^\]]|\]\])*(?:\]|$)|"(?:[^"]|"")*(?:"|$)|(?<literal>N?'(?:[^']|'')*(?:'|$)|(?<![\w@])\$\s*[+-]?(?:\d+(?:\.\d*)?|\.\d+)|\b0x[\da-f]*(?:\\(?:\r\n|\r|\n)[\da-f]*)*|(?<![\w$@])-?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?(?![\w]))|[^]/giy;
   for (let index = 0; index < input.length; ) {
     if (input.startsWith("/*", index)) {
       let depth = 1;

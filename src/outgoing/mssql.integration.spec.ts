@@ -411,6 +411,8 @@ describe("MSSQL statement sanitization", () => {
       `SELECT [123], [a]]b], "456", "a""b", [--keep], "/*keep*/" FROM [dbo].[orders2] WHERE col1 = -1.5e-3 AND x IN (1, 2, 3)`,
       `SELECT [123], [a]]b], "456", "a""b", [--keep], "/*keep*/" FROM [dbo].[orders2] WHERE col1 = ? AND x IN (?)`,
     ],
+    ["SELECT 0x0123\\\nDEADBEEF, 1", "SELECT ?, ?"],
+    ["SELECT 0x0123\\\r\nDEAD\\\rBEEF FROM t", "SELECT ? FROM t"],
     ["SELECT 1--private\rFROM orders", "SELECT ? FROM orders"],
     ["SELECT .5, $ -12.5, 0XCAFE, n'private'", "SELECT ?, ?, ?, ?"],
   ])("redacts %s", async (sql, expected) => {
