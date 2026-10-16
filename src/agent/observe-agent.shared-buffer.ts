@@ -3,6 +3,7 @@ import {
   DEGRADED_TTL_MS,
   isNotableSnapshot,
 } from "./degraded-ingest.protocol.js";
+import { MAX_BATCH_ITEMS } from "./telemetry-wire-contract.js";
 import { Inject, Injectable, Logger, Optional } from "@nestjs/common";
 import { Counter, Gauge, Summary } from "../custom-metrics/index.js";
 import {
@@ -248,8 +249,7 @@ export class ObserveAgentSharedBuffer {
       this._mainThreadBuffer = this.createEmptyPayload();
     }
 
-    const maxPerBatch =
-      this.options.maxTracesPerBatch ?? DEFAULT_MAX_SNAPSHOTS_PER_TRANSACTION;
+    const maxPerBatch = this.maxOperationsPerBatch;
     if (this._mainThreadBuffer.snapshots.length >= maxPerBatch) {
       if (this.options.debug) {
         this.logger.debug(
@@ -301,8 +301,7 @@ export class ObserveAgentSharedBuffer {
     // empties when a flush succeeds, so without a ceiling a stalled flush on
     // the worker service - the process that sees every queue job - grows this
     // array for as long as the stall lasts.
-    const maxPerBatch =
-      this.options.maxTracesPerBatch ?? DEFAULT_MAX_SNAPSHOTS_PER_TRANSACTION;
+    const maxPerBatch = this.maxOperationsPerBatch;
     if (this._mainThreadBuffer.jobs.length >= maxPerBatch) {
       if (this.options.debug) {
         this.logger.debug(
@@ -363,6 +362,18 @@ export class ObserveAgentSharedBuffer {
     }
     this._mainThreadBuffer.truncatedSpans =
       (this._mainThreadBuffer.truncatedSpans ?? 0) + countTraceNodes(traces);
+  }
+
+  /**
+   * `maxTracesPerBatch`, held to the most the collector accepts in one section
+   * of a batch. It refuses a batch holding more whole, so a setting above that
+   * would cost a busy window every operation in it rather than the overflow.
+   */
+  private get maxOperationsPerBatch(): number {
+    return Math.min(
+      this.options.maxTracesPerBatch ?? DEFAULT_MAX_SNAPSHOTS_PER_TRANSACTION,
+      MAX_BATCH_ITEMS,
+    );
   }
 
   isBufferLocked() {

@@ -321,6 +321,8 @@ export interface ObserveOptions {
   /**
    * Maximum number of traces per batch that can be sent to the Agent.
    * This is useful for controlling the volume of traces sent, especially in high-traffic applications.
+   * At most 5000, the most the collector accepts in one batch - a larger value
+   * is read as 5000.
    * @default 1000
    */
   maxTracesPerBatch?: number;

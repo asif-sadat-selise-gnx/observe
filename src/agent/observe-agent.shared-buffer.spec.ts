@@ -12,6 +12,7 @@ import { DEGRADED_TTL_MS } from "./degraded-ingest.protocol.js";
 import { ObserveAgentSharedBuffer } from "./observe-agent.shared-buffer.js";
 import {
   createTelemetrySanitizer,
+  MAX_BATCH_ITEMS,
   SECTION_SHAPES,
   validateTelemetryPayload,
 } from "./telemetry-wire-contract.js";
@@ -602,6 +603,20 @@ describe("ObserveAgentSharedBuffer", () => {
       // The buffer only empties when a flush succeeds, so without this cap a
       // stalled flush on the worker service would grow the array unboundedly.
       expect((batchOf(buffer) as { jobs?: unknown[] }).jobs).toHaveLength(3);
+    });
+
+    it("holds maxTracesPerBatch to the most the collector accepts", () => {
+      const buffer = createBuffer({ maxTracesPerBatch: 10_000 });
+
+      for (let index = 0; index <= MAX_BATCH_ITEMS; index += 1) {
+        buffer.insertJobSnapshot({ name: `job-${index}` } as never);
+      }
+
+      // It refuses a batch holding more whole - every job in it lost, rather
+      // than the overflow.
+      expect((batchOf(buffer) as { jobs?: unknown[] }).jobs).toHaveLength(
+        MAX_BATCH_ITEMS,
+      );
     });
   });
 

@@ -53,14 +53,40 @@ export interface FieldSpec {
   readonly shape?: Shape;
   /** The nested contract is this shape itself - trace nodes nest arbitrarily deep. */
   readonly recursive?: boolean;
+  /**
+   * Longest string the API accepts (`@MaxLength`), counted the way it counts:
+   * a surrogate pair or a variation selector is not a character of its own.
+   * For an array of strings, the limit on each element.
+   */
+  readonly maxLength?: number;
+  /** The only values the API accepts (`@IsIn`, `@IsEnum`). */
+  readonly oneOf?: readonly (string | number)[];
+  /** Most elements the API accepts in an array field (`@ArrayMaxSize`). */
+  readonly maxItems?: number;
 }
 
 export type Shape = Readonly<Record<string, FieldSpec>>;
 
-/** One span. Nests through `ch` to whatever depth the operation produced. */
+/**
+ * Most entries the API accepts in one section of a batch. It refuses a batch
+ * with more whole, so every producer has to stay under it.
+ */
+export const MAX_BATCH_ITEMS = 5000;
+
+/** The levels a forwarded log line may carry - Nest's own. */
+const LOG_LEVELS = ["fatal", "error", "warn", "log", "debug", "verbose"];
+
+/**
+ * One span. Nests through `ch` to whatever depth the operation produced.
+ *
+ * The API checks spans by hand rather than through a DTO, and requires `o`,
+ * `c` and `m` of every one - so a span missing any of them, or carrying one
+ * the API refuses, is dropped from its tree on repair rather than stripped of
+ * the field and refused again.
+ */
 const TRACE_NODE: Shape = {
-  n: { type: "string" },
-  o: { type: "string" },
+  n: { type: "string", maxLength: 255 },
+  o: { type: "string", required: true, oneOf: ["manual", "auto"] },
   t: { type: "object" },
   d: { type: "number" },
   // Boolean is the "an error occurred but was handled, details not captured"
@@ -68,8 +94,8 @@ const TRACE_NODE: Shape = {
   // primitive, reports `e: true` rather than an error object. See
   // `TraceSpan.error`.
   e: { type: "object", alsoAccepts: ["boolean"] },
-  c: { type: "string" },
-  m: { type: "string" },
+  c: { type: "string", required: true, maxLength: 255 },
+  m: { type: "string", required: true, maxLength: 255 },
   s: { type: "string" },
   so: { type: "number" },
   ch: { type: "object", array: true, recursive: true },
@@ -99,7 +125,7 @@ const TRACES: FieldSpec = {
 /** No `st`: see the note at the top of this file. */
 const REQUEST_SNAPSHOT: Shape = {
   ct: { type: "string" },
-  ti: { type: "string", required: true },
+  ti: { type: "string", required: true, maxLength: 255 },
   d: { type: "number" },
   p: { type: "string" },
   op: { type: "string" },
@@ -114,7 +140,7 @@ const REQUEST_SNAPSHOT: Shape = {
 /** No `st` here either, for the same reason. */
 const JOB_SNAPSHOT: Shape = {
   i: { type: "string", required: true },
-  ti: { type: "string" },
+  ti: { type: "string", required: true, maxLength: 255 },
   n: { type: "string" },
   q: { type: "string" },
   s: { type: "string" },
@@ -193,14 +219,14 @@ const RUNTIME_METRICS: Shape = {
  * can still be dropped on its own.
  */
 const CUSTOM_METRIC: Shape = {
-  n: { type: "string", required: true },
-  t: { type: "string" },
+  n: { type: "string", required: true, maxLength: 100 },
+  t: { type: "string", required: true, oneOf: ["counter", "gauge", "summary"] },
   v: { type: "object" },
   tg: { type: "object" },
-  d: { type: "string" },
-  l: { type: "string", array: true },
+  d: { type: "string", maxLength: 255 },
+  l: { type: "string", array: true, maxLength: 255, maxItems: 1000 },
   lu: { type: "number" },
-  k: { type: "string" },
+  k: { type: "string", oneOf: ["additive", "ratio", "peak"] },
   iv: { type: "object" },
   q50: { type: "object" },
   q95: { type: "object" },
@@ -213,10 +239,10 @@ const CUSTOM_METRIC: Shape = {
 const LOG_ENTRY: Shape = {
   timestamp: { type: "number", required: true },
   text: { type: "string", required: true },
-  traceId: { type: "string" },
-  spanId: { type: "string" },
-  level: { type: "string" },
-  context: { type: "string" },
+  traceId: { type: "string", maxLength: 255 },
+  spanId: { type: "string", maxLength: 255 },
+  level: { type: "string", oneOf: LOG_LEVELS },
+  context: { type: "string", maxLength: 255 },
   attributes: { type: "object" },
 };
 
@@ -230,35 +256,68 @@ const DECLARED_OBJECTIVE: Shape = {
       target: { type: "number", required: true },
     },
   },
-  windowDays: { type: "number" },
-  name: { type: "string" },
+  windowDays: { type: "number", oneOf: [7, 14, 28, 30] },
+  name: { type: "string", maxLength: 120 },
 };
 
 /** A handler's objectives, with the route it was seen to serve. */
 const OBJECTIVE_DECLARATION: Shape = {
-  handler: { type: "string", required: true },
-  operationId: { type: "string", required: true },
-  method: { type: "string" },
+  handler: { type: "string", required: true, maxLength: 255 },
+  operationId: { type: "string", required: true, maxLength: 255 },
+  method: { type: "string", maxLength: 10 },
   objectives: {
     type: "object",
     array: true,
     required: true,
+    maxItems: 10,
     shape: DECLARED_OBJECTIVE,
   },
 };
 
-/** The batch body the agent POSTs to the collector. */
+/**
+ * The batch body the agent POSTs to the collector.
+ *
+ * Only the sections' entries are repaired on a 400 - see `SECTION_SHAPES`. The
+ * limits on the batch itself (the service id, how many entries a section
+ * holds) are kept where the batch is built, and are declared here so a test
+ * that sends one over them fails.
+ */
 export const TELEMETRY_BATCH: Shape = {
-  serviceId: { type: "string", required: true },
-  serviceVersion: { type: "string" },
+  serviceId: { type: "string", required: true, maxLength: 100 },
+  serviceVersion: { type: "string", maxLength: 50 },
   truncatedSpans: { type: "number" },
   forwardLogs: { type: "boolean" },
-  snapshots: { type: "object", array: true, shape: REQUEST_SNAPSHOT },
-  jobs: { type: "object", array: true, shape: JOB_SNAPSHOT },
+  snapshots: {
+    type: "object",
+    array: true,
+    maxItems: MAX_BATCH_ITEMS,
+    shape: REQUEST_SNAPSHOT,
+  },
+  jobs: {
+    type: "object",
+    array: true,
+    maxItems: MAX_BATCH_ITEMS,
+    shape: JOB_SNAPSHOT,
+  },
   runtime: { type: "object", shape: RUNTIME_METRICS },
-  custom: { type: "object", array: true, shape: CUSTOM_METRIC },
-  logs: { type: "object", array: true, shape: LOG_ENTRY },
-  objectives: { type: "object", array: true, shape: OBJECTIVE_DECLARATION },
+  custom: {
+    type: "object",
+    array: true,
+    maxItems: MAX_BATCH_ITEMS,
+    shape: CUSTOM_METRIC,
+  },
+  logs: {
+    type: "object",
+    array: true,
+    maxItems: MAX_BATCH_ITEMS,
+    shape: LOG_ENTRY,
+  },
+  objectives: {
+    type: "object",
+    array: true,
+    maxItems: 100,
+    shape: OBJECTIVE_DECLARATION,
+  },
 };
 
 /**
@@ -344,6 +403,9 @@ function checkField(
       errors.push(`${path}: expected an array`);
       return;
     }
+    if (spec.maxItems !== undefined && value.length > spec.maxItems) {
+      errors.push(`${path}: more than ${spec.maxItems} items`);
+    }
     value.forEach((item, index) => {
       checkField(
         item,
@@ -378,7 +440,33 @@ function checkField(
   }
   if (typeof value !== spec.type) {
     errors.push(`${path}: expected a ${spec.type}, got ${typeof value}`);
+    return;
   }
+  if (spec.oneOf && !spec.oneOf.includes(value as string | number)) {
+    errors.push(`${path}: not one of ${spec.oneOf.join(", ")}`);
+  }
+  if (
+    spec.maxLength !== undefined &&
+    typeof value === "string" &&
+    exceedsMaxLength(value, spec.maxLength)
+  ) {
+    errors.push(`${path}: longer than ${spec.maxLength} characters`);
+  }
+}
+
+/**
+ * Whether a string is longer than the API's `@MaxLength` allows. It counts the
+ * way validator.js's `isLength` does - the second half of a surrogate pair and
+ * a variation selector are not characters - so the exact count is taken only
+ * once `.length`, which can only overcount, says the string might be over.
+ */
+function exceedsMaxLength(value: string, maxLength: number): boolean {
+  if (value.length <= maxLength) {
+    return false;
+  }
+  const pairs = value.match(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g)?.length ?? 0;
+  const selectors = value.match(/[\uFE0E\uFE0F]/g)?.length ?? 0;
+  return value.length - pairs - selectors > maxLength;
 }
 
 export interface SanitizeEntryResult {
@@ -418,6 +506,17 @@ export interface TelemetrySanitizer {
  * fails validation there. They are judged here as what they will be on the
  * wire, not as what they are in memory.
  *
+ * Limits are judged like types: an optional field longer than the API takes,
+ * or holding a value it does not accept, is removed, and a required one costs
+ * its entry. A string is removed rather than cut on purpose. Everything that
+ * can legitimately run long is already cut where it is produced, with a hash
+ * that keeps two cut values apart (`fitToLength`), so a value still over its
+ * limit when the API refuses the batch is a bug upstream - the worker's report
+ * names it, where a cut would hide it behind a plausible value. And most
+ * bounded fields are identifiers, trace and span ids and metric names, which a
+ * cut turns into the name of something else. An array over its size is the
+ * exception: it keeps its head, since each element is a value on its own.
+ *
  * A factory rather than module-level functions, and deliberately
  * self-contained - it closes over nothing but its own parameter. The detached
  * worker runs as a stringified function with no module scope, so this
@@ -434,9 +533,20 @@ export interface TelemetrySanitizer {
 export function createTelemetrySanitizer(
   shapes: Record<TelemetrySection, Shape>,
 ): TelemetrySanitizer {
-  // Local copy of the module-level helper, for the self-containment above.
+  // Local copies of the module-level helpers, for the self-containment above
+  // - moving them out, as the linter asks, is exactly what would break it.
+  // oxlint-disable-next-line unicorn/consistent-function-scoping
   const isPlainRecord = (value: unknown): value is Record<string, unknown> =>
     typeof value === "object" && value !== null && !Array.isArray(value);
+  // oxlint-disable-next-line unicorn/consistent-function-scoping
+  const isTooLong = (value: string, maxLength: number): boolean => {
+    if (value.length <= maxLength) {
+      return false;
+    }
+    const pairs = value.match(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g)?.length ?? 0;
+    const selectors = value.match(/[\uFE0E\uFE0F]/g)?.length ?? 0;
+    return value.length - pairs - selectors > maxLength;
+  };
 
   /** Returns whether the value is still usable once stripped. */
   const sanitizeShape = (
@@ -518,6 +628,12 @@ export function createTelemetrySanitizer(
           value.splice(index, 1);
         }
       }
+      if (spec.maxItems !== undefined && value.length > spec.maxItems) {
+        problems.push(
+          `${path}: more than ${spec.maxItems} items, ${value.length - spec.maxItems} removed`,
+        );
+        value.length = spec.maxItems;
+      }
       return true;
     }
 
@@ -544,6 +660,18 @@ export function createTelemetrySanitizer(
     if (spec.type === "number" && !Number.isFinite(value)) {
       // Serializes to null, which the API reads as a present, invalid field.
       problems.push(`${path}: non-finite number`);
+      return false;
+    }
+    if (spec.oneOf && !spec.oneOf.includes(value as string | number)) {
+      problems.push(`${path}: not one of ${spec.oneOf.join(", ")}`);
+      return false;
+    }
+    if (
+      spec.maxLength !== undefined &&
+      typeof value === "string" &&
+      isTooLong(value, spec.maxLength)
+    ) {
+      problems.push(`${path}: longer than ${spec.maxLength} characters`);
       return false;
     }
     return true;

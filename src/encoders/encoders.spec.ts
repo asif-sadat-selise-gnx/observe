@@ -18,9 +18,9 @@ import { RuntimeMetricsEncoder } from "./runtime-metrics.encoder.js";
  */
 describe("remapKeys", () => {
   it("copies only the keys the map names", () => {
-    expect(
-      remapKeys({ name: "orders", extra: 1 }, { name: "n" }),
-    ).toEqual({ n: "orders" });
+    expect(remapKeys({ name: "orders", extra: 1 }, { name: "n" })).toEqual({
+      n: "orders",
+    });
   });
 
   it("ignores a source key that only the map's prototype answers to", () => {
@@ -843,7 +843,7 @@ describe("telemetry wire contract", () => {
       validateTelemetryPayload({
         serviceId: "svc",
         snapshots: [{ ti: "trace-1" }],
-        jobs: [{ i: "job-1" }],
+        jobs: [{ i: "job-1", ti: "trace-2" }],
       }),
     ).toEqual(["snapshots[0].t: required", "jobs[0].t: required"]);
   });
@@ -852,6 +852,33 @@ describe("telemetry wire contract", () => {
     expect(
       validateTelemetryPayload({ ...valid, serviceId: 1 as never }),
     ).toEqual(["serviceId: expected a string, got number"]);
+  });
+
+  it("reports a value over the API's limits", () => {
+    // Each gets the whole batch refused, so a test sending one has to fail.
+    expect(
+      validateTelemetryPayload({
+        serviceId: "s".repeat(101),
+        snapshots: [],
+        logs: Array.from({ length: 5_001 }, (_, i) => ({
+          timestamp: i,
+          text: "x",
+        })),
+        objectives: [
+          {
+            handler: "UsersController.find",
+            operationId: "GET /users",
+            method: "PROPFIND-ALL",
+            objectives: [{ availability: 99.9, windowDays: 10 }],
+          },
+        ],
+      }),
+    ).toEqual([
+      "serviceId: longer than 100 characters",
+      "logs: more than 5000 items",
+      "objectives[0].method: longer than 10 characters",
+      "objectives[0].objectives[0].windowDays: not one of 7, 14, 28, 30",
+    ]);
   });
 
   it("descends into nested shapes", () => {
@@ -868,7 +895,17 @@ describe("telemetry wire contract", () => {
       {
         serviceId: "svc",
         snapshots: [
-          { ti: "trace-1", t: [{ n: "outer", ch: [{ n: "inner", zz: 1 }] }] },
+          {
+            ti: "trace-1",
+            t: [
+              {
+                o: "auto",
+                c: "Outer",
+                m: "run",
+                ch: [{ o: "auto", c: "Inner", m: "run", zz: 1 }],
+              },
+            ],
+          },
         ],
       },
       { forbidUnknown: true },

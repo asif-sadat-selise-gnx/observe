@@ -23,6 +23,15 @@ describe("sanitizeTelemetryEntry", () => {
       t: [],
       ...overrides,
     });
+    // `o`, `c` and `m` are required of every span by the API.
+    const span = (
+      overrides: Record<string, unknown> = {},
+    ): Record<string, unknown> => ({
+      o: "auto",
+      c: "UsersService",
+      m: "findOne",
+      ...overrides,
+    });
 
     it("accepts a well-formed snapshot untouched", () => {
       const entry = snapshot();
@@ -49,7 +58,10 @@ describe("sanitizeTelemetryEntry", () => {
     });
 
     it("reports a snapshot without a trace id as unsalvageable", () => {
-      const result = sanitizeTelemetryEntry("snapshots", snapshot({ ti: undefined }));
+      const result = sanitizeTelemetryEntry(
+        "snapshots",
+        snapshot({ ti: undefined }),
+      );
 
       expect(result.ok).toBe(false);
       expect(result.problems).toEqual(["snapshots.ti: required"]);
@@ -103,19 +115,21 @@ describe("sanitizeTelemetryEntry", () => {
     it("sanitizes trace nodes recursively", () => {
       const entry = snapshot({
         t: [
-          {
+          span({
             n: "span",
             d: 1,
             leaked: true,
-            ch: [{ n: "child", startTimestamp: 99 }],
-          },
+            ch: [span({ n: "child", startTimestamp: 99 })],
+          }),
         ],
       });
 
       const result = sanitizeTelemetryEntry("snapshots", entry);
 
       expect(result.ok).toBe(true);
-      expect(entry.t).toEqual([{ n: "span", d: 1, ch: [{ n: "child" }] }]);
+      expect(entry.t).toEqual([
+        span({ n: "span", d: 1, ch: [span({ n: "child" })] }),
+      ]);
     });
 
     it("keeps a boolean error flag on a trace node", () => {
@@ -124,23 +138,25 @@ describe("sanitizeTelemetryEntry", () => {
       // erase real error signals.
       const entry = snapshot({
         e: { message: "root failed" },
-        t: [{ n: "child", e: true }],
+        t: [span({ n: "child", e: true })],
       });
 
       const result = sanitizeTelemetryEntry("snapshots", entry);
 
       expect(result).toEqual({ ok: true, problems: [] });
-      expect(entry.t).toEqual([{ n: "child", e: true }]);
+      expect(entry.t).toEqual([span({ n: "child", e: true })]);
       expect(entry.e).toEqual({ message: "root failed" });
     });
 
     it("removes an unusable array element, keeping its siblings", () => {
-      const entry = snapshot({ t: [{ n: "good" }, "not a span", { n: "also good" }] });
+      const entry = snapshot({
+        t: [span({ n: "good" }), "not a span", span({ n: "also good" })],
+      });
 
       const result = sanitizeTelemetryEntry("snapshots", entry);
 
       expect(result.ok).toBe(true);
-      expect(entry.t).toEqual([{ n: "good" }, { n: "also good" }]);
+      expect(entry.t).toEqual([span({ n: "good" }), span({ n: "also good" })]);
     });
 
     it("strips undeclared attribute keys", () => {
@@ -156,8 +172,12 @@ describe("sanitizeTelemetryEntry", () => {
 
   describe("other sections", () => {
     it("requires a job id", () => {
-      expect(sanitizeTelemetryEntry("jobs", { n: "send-mail" }).ok).toBe(false);
-      expect(sanitizeTelemetryEntry("jobs", { i: "job-1" }).ok).toBe(true);
+      expect(
+        sanitizeTelemetryEntry("jobs", { n: "send-mail", ti: "t-1" }).ok,
+      ).toBe(false);
+      expect(sanitizeTelemetryEntry("jobs", { i: "job-1", ti: "t-1" }).ok).toBe(
+        true,
+      );
     });
 
     it("requires a custom metric name", () => {
@@ -241,6 +261,125 @@ describe("sanitizeTelemetryEntry", () => {
       expect(entry).toEqual({ c: { u: 0.5, s: 0.1, p: 0.2 } });
     });
 
+    it("removes a log line's metadata the API refuses, keeping the line", () => {
+      // Each of these alone got the whole batch refused - traces and metrics
+      // included - and the repair, knowing only types, found nothing to fix.
+      const entry = {
+        timestamp: 1,
+        text: "hello",
+        traceId: "t".repeat(256),
+        spanId: "s".repeat(256),
+        level: "info",
+        context: "c".repeat(256),
+      };
+
+      const result = sanitizeTelemetryEntry("logs", entry);
+
+      expect(result).toEqual({
+        ok: true,
+        problems: [
+          "logs.traceId: longer than 255 characters",
+          "logs.spanId: longer than 255 characters",
+          "logs.level: not one of fatal, error, warn, log, debug, verbose",
+          "logs.context: longer than 255 characters",
+        ],
+      });
+      expect(entry).toEqual({ timestamp: 1, text: "hello" });
+    });
+
+    it.each([
+      ["a character outside the BMP", "😀"],
+      ["a variation selector", "\u2764\uFE0F"],
+    ])("counts the length of %s the way the API does", (_label, unit) => {
+      // Two UTF-16 units each, one character to the API's `@MaxLength`.
+      const fits = { timestamp: 1, text: "x", context: unit.repeat(255) };
+      const over = { timestamp: 1, text: "x", context: unit.repeat(256) };
+
+      sanitizeTelemetryEntry("logs", fits);
+      sanitizeTelemetryEntry("logs", over);
+
+      expect(fits.context).toBe(unit.repeat(255));
+      expect(over).not.toHaveProperty("context");
+    });
+
+    it("drops an entry whose required field is over its limit", () => {
+      const result = sanitizeTelemetryEntry("snapshots", {
+        ti: "t".repeat(256),
+        t: [],
+      });
+
+      // A cut trace id would name another trace; there is no fixing it.
+      expect(result).toEqual({
+        ok: false,
+        problems: ["snapshots.ti: longer than 255 characters"],
+      });
+    });
+
+    it("drops a span the API would refuse, keeping its siblings", () => {
+      const span = (overrides: Record<string, unknown>) => ({
+        o: "auto",
+        c: "UsersService",
+        m: "findOne",
+        ...overrides,
+      });
+      const entry: Record<string, unknown> = {
+        ti: "t-1",
+        t: [span({ c: "C".repeat(256) }), span({ o: "other" }), span({})],
+      };
+
+      const result = sanitizeTelemetryEntry("snapshots", entry);
+
+      // The API requires both of every span, so the span goes rather than the
+      // field - stripping it alone would be refused again.
+      expect(result).toEqual({
+        ok: true,
+        problems: [
+          "snapshots.t[1].o: not one of manual, auto",
+          "snapshots.t[0].c: longer than 255 characters",
+        ],
+      });
+      expect(entry.t).toEqual([span({})]);
+    });
+
+    it("repairs a custom metric's kind and labels", () => {
+      const labels = Array.from({ length: 1_002 }, (_, i) => `label-${i}`);
+      labels[3] = "l".repeat(256);
+      const entry: Record<string, unknown> = {
+        n: "orders",
+        t: "counter",
+        k: "sum",
+        l: labels,
+      };
+
+      const result = sanitizeTelemetryEntry("custom", entry);
+
+      expect(result).toEqual({
+        ok: true,
+        problems: [
+          "custom.l[3]: longer than 255 characters",
+          "custom.l: more than 1000 items, 1 removed",
+          "custom.k: not one of additive, ratio, peak",
+        ],
+      });
+      // The head is kept: an over-long label goes alone, then the tail.
+      expect(entry.l).toEqual([
+        "label-0",
+        "label-1",
+        "label-2",
+        ...Array.from({ length: 997 }, (_, i) => `label-${i + 4}`),
+      ]);
+      expect(entry).not.toHaveProperty("k");
+    });
+
+    it("drops a custom metric of a type the API does not take", () => {
+      const result = sanitizeTelemetryEntry("custom", {
+        n: "latency",
+        t: "histogram",
+      });
+
+      expect(result.ok).toBe(false);
+    });
+
     it("keeps a runtime sample's GC breakdown", () => {
       // Each kind is a count and a duration, not a number. Declared as one,
       // every repaired batch lost its whole breakdown and blamed the kinds.
@@ -311,6 +450,41 @@ describe("sanitizeTelemetryEntry", () => {
       expect(result).toEqual({ changed: false, dropped: 0, problems: [] });
     });
 
+    it("repairs a batch the API refused over one log line's metadata", () => {
+      // What one injected log line used to cost: every snapshot and log in
+      // the batch, since the repair found nothing it knew how to fix.
+      const payload: Record<string, unknown> = {
+        serviceId: "svc",
+        snapshots: [{ ti: "t-1", op: "/users", d: 3, t: [] }],
+        logs: [
+          { timestamp: 1, text: "kept" },
+          {
+            timestamp: 2,
+            text: "forged",
+            level: "info",
+            context: "C".repeat(300),
+            traceId: "T".repeat(300),
+          },
+        ],
+      };
+      expect(validateTelemetryPayload(payload)).toEqual([
+        "logs[1].traceId: longer than 255 characters",
+        "logs[1].level: not one of fatal, error, warn, log, debug, verbose",
+        "logs[1].context: longer than 255 characters",
+      ]);
+
+      const result = sanitizeTelemetryBatch(payload);
+
+      expect(result).toMatchObject({ changed: true, dropped: 0 });
+      expect(payload.logs).toEqual([
+        { timestamp: 1, text: "kept" },
+        { timestamp: 2, text: "forged" },
+      ]);
+      expect(
+        validateTelemetryPayload(payload, { forbidUnknown: true }),
+      ).toEqual([]);
+    });
+
     it("repairs a degraded batch whose operations lost their trace arrays", () => {
       // The batch nestjs/observe#14 was reported over, refused with
       // `jobs.0.t must be an array`: every operation is kept, and it then
@@ -356,6 +530,16 @@ describe("sanitizeTelemetryEntry", () => {
       expect(entry).not.toHaveProperty("st");
       // The fallback travels with the shapes, so it has to survive that trip.
       expect(entry.t).toEqual([]);
+
+      // So do the limits, and the length the worker counts them by.
+      const log: Record<string, unknown> = {
+        timestamp: 1,
+        text: "x",
+        level: "info",
+        context: "😀".repeat(256),
+      };
+      expect(rebuilt.sanitizeEntry("logs", log).ok).toBe(true);
+      expect(log).toEqual({ timestamp: 1, text: "x" });
     });
   });
 });
