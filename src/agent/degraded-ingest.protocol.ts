@@ -77,8 +77,8 @@ export function parseDegradedMessage(msg: string): IngestMode | null {
 
 /**
  * How the detached worker tells the main thread it will send nothing until a
- * given time (epoch milliseconds): after a 429, until the pause lapses; after
- * rejected credentials, never.
+ * given time (epoch milliseconds): after a 429 or rejected credentials, until
+ * that pause lapses.
  *
  * Only the final flush reads it. A paused worker leaves the shared slot
  * untouched, so without this a shutdown would wait out its whole deadline for

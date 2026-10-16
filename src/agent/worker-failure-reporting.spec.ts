@@ -44,6 +44,7 @@ const firstReport = async (
       endpoint,
       appKey: "k",
       appSecret: "s",
+      flushInterval: 5000,
     }),
   });
 

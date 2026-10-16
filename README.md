@@ -80,9 +80,12 @@ OBSERVE_APP_SECRET=...
 ```
 
 Without valid credentials the collector answers `401` and telemetry is dropped.
-Leave `appKey` or `appSecret` unset and nothing is sent to the hosted
-collector at all, with a warning at startup instead; a collector of your own
-at `endpoint` still receives batches without them.
+The agent says so once, then backs off - one flush interval, then two, then
+four, up to one attempt an hour - until the credentials are fixed. They are
+read at startup, so that takes a restart. Leave `appKey` or `appSecret` unset
+and nothing is sent to the hosted collector at all, with a warning at startup
+instead; a collector of your own at `endpoint` still receives batches without
+them.
 
 ## Quick start
 

@@ -14,6 +14,11 @@ export interface DetachedWorkerConfig {
   endpoint: string;
   appKey?: string;
   appSecret?: string;
+  /**
+   * Milliseconds between the main thread's flushes, as clamped there: the
+   * first pause after rejected credentials, which then doubles.
+   */
+  flushInterval: number;
   /** Plain JSON, so it travels as data; the sanitizer that reads it travels as source. */
   wireShapes: Parameters<typeof createTelemetrySanitizer>[0];
   /** `DEGRADED_MESSAGE_PREFIX`, as data - see where it is read below. */
@@ -115,67 +120,95 @@ export const detachedObserveWorker = (
   }
 
   /**
-   * Whether the collector has already refused these credentials.
+   * How many times the collector has refused these credentials since
+   * start-up.
    *
-   * Rejected credentials do not recover on their own: the values arrive in the
-   * environment and are read once at start-up, so nothing short of a restart
-   * can change the answer. Reporting it on every flush therefore adds no
-   * information and costs a line every few seconds - 535 identical errors in
-   * half an hour, in the run that prompted this - which buries whatever else
-   * the service was trying to say.
-   *
-   * Said once, in full, and then only counted. Flushing continues either way:
-   * the batch is dropped rather than queued, so a fixed deployment starts
-   * reporting again without anything to drain.
+   * Reporting every rejection adds no information and once cost a line every
+   * few seconds - 535 identical errors in half an hour, in the run that
+   * prompted this - which buries whatever else the service was trying to
+   * say. So the first is said in full and the rest are only counted.
    */
   let authRejections = 0;
 
   /**
-   * How many rejected batches between reminders. At the default five-second
-   * flush this is roughly hourly - often enough that a long-running process
-   * silently dropping telemetry is still visible in a day's logs, rare enough
-   * that it never competes with anything.
+   * How many rejections between reminders.
+   *
+   * Chosen when every flush was sent into the rejection, which made it
+   * roughly hourly at the default five-second flush. Sends now back off (see
+   * `authBackoffMs`) to one an hour, so at that flush the same count comes
+   * round after about a month: a reminder for a process that has been failing
+   * for that long, not the hourly line it used to be.
    */
   const AUTH_REJECTION_REPORT_EVERY = 720;
 
   /**
-   * When sending may resume after the collector answered 429.
+   * When sending may resume after the collector refused a batch: a 429, or
+   * rejected credentials (401/403).
    *
-   * A 429 means the account is out of credits or over budget, and that does
-   * not change batch to batch: retrying at the flush cadence is sixty more
-   * refusals in five minutes, each costing the collector a request and this
-   * process a log line. So sends pause outright. The main thread keeps
-   * overwriting the shared buffer with newer batches in the meantime - the
-   * buffer holds exactly one, so pausing drops data by replacement rather
-   * than growing a queue - and once the pause lapses the next flush goes out
-   * normally. If the collector is still refusing, it answers 429 again and
-   * the pause restarts.
+   * Neither changes batch to batch - an account out of credits stays out for
+   * minutes at least, and credentials are read once at start-up - so
+   * retrying at the flush cadence only buys more refusals, each costing the
+   * collector a request and this process a log line. So sends pause
+   * outright. The main thread keeps overwriting the shared buffer with newer
+   * batches in the meantime - the buffer holds exactly one, so pausing drops
+   * data by replacement rather than growing a queue - and once the pause
+   * lapses the next flush goes out normally. If the collector is still
+   * refusing, it answers the same again and the pause restarts.
    */
-  let rateLimitedUntil = 0;
+  let pausedUntil = 0;
 
   /**
-   * How long to pause when the 429 carries no usable Retry-After. Long enough
+   * How long to pause when a 429 carries no usable Retry-After. Long enough
    * that a depleted account is not being polled, short enough that a topped-up
    * one resumes within minutes.
    */
   const RATE_LIMIT_PAUSE_MS = 5 * 60 * 1000;
 
-  /** Ceiling on a server-sent Retry-After, so a bad header cannot park the
-   * worker for a day. */
-  const RATE_LIMIT_PAUSE_MAX_MS = 60 * 60 * 1000;
+  /**
+   * The longest any pause lasts: the ceiling on a server-sent Retry-After, so
+   * a bad header cannot park the worker for a day, and where the backoff after
+   * rejected credentials stops doubling.
+   */
+  const PAUSE_MAX_MS = 60 * 60 * 1000;
 
   /**
-   * How long to pause for, from the response's Retry-After when it carries
-   * one. Only the delta-seconds form is parsed - the HTTP-date form is rare
-   * on rate limits and mis-parsing it risks an enormous pause - and anything
-   * absent, malformed, or out of range falls back to the default.
+   * The pause after the latest of a run of rejected credentials, before any
+   * Retry-After: one flush interval after the first, doubling with each one
+   * after it up to `PAUSE_MAX_MS`, then one probe an hour. 0 until the first,
+   * and again once the collector accepts a batch.
+   *
+   * Every flush used to be sent into the rejection, and at the hosted
+   * collector that added up: on 2026-10-15 it refused 1.87M batches - 38% of
+   * every request it served - from about 2,000 addresses presenting a deleted
+   * key, a wrong secret or none at all, many of them every five seconds for
+   * weeks. Nothing changes for such a process until someone fixes its
+   * credentials and restarts it. The quick first retries cover a collector
+   * that refused a good key by mistake; the hourly probe picks up a fix on
+   * its side within the hour.
    */
-  const rateLimitPauseMs = (response: CollectorResponse) => {
+  let authBackoffMs = 0;
+
+  /**
+   * Where the backoff starts. Falls back to the default flush when the config
+   * carries no usable interval, rather than not backing off at all.
+   */
+  const AUTH_BACKOFF_BASE_MS =
+    Number.isFinite(config.flushInterval) && config.flushInterval > 0
+      ? config.flushInterval
+      : 5000;
+
+  /**
+   * The pause a response's Retry-After asks for, or null when it carries
+   * none. Only the delta-seconds form is parsed - the HTTP-date form is rare
+   * on refusals and mis-parsing it risks an enormous pause - and anything
+   * absent, malformed, or out of range counts as none.
+   */
+  const retryAfterMs = (response: CollectorResponse): number | null => {
     const retryAfter = Number(response.headers.get("retry-after"));
     if (Number.isFinite(retryAfter) && retryAfter > 0) {
-      return Math.min(retryAfter * 1000, RATE_LIMIT_PAUSE_MAX_MS);
+      return Math.min(retryAfter * 1000, PAUSE_MAX_MS);
     }
-    return RATE_LIMIT_PAUSE_MS;
+    return null;
   };
 
   /**
@@ -453,10 +486,10 @@ export const detachedObserveWorker = (
    * immediately or to sleep first.
    */
   const sendInstrumentationJsonData = async () => {
-    if (Date.now() < rateLimitedUntil) {
-      // Rate-limited: not even worth taking the lock. Returning false routes
-      // through the idle sleep, and the main thread goes on replacing the
-      // buffered batch with fresher ones.
+    if (Date.now() < pausedUntil) {
+      // Paused after a refusal: not even worth taking the lock. Returning
+      // false routes through the idle sleep, and the main thread goes on
+      // replacing the buffered batch with fresher ones.
       return false;
     }
 
@@ -517,9 +550,17 @@ export const detachedObserveWorker = (
       if (!response.ok) {
         if (response.status === 401 || response.status === 403) {
           authRejections += 1;
-          // Nothing will be accepted until a restart, so a final flush has
-          // nothing to wait for.
-          parentPort.postMessage(`${pausedPrefix}${Number.MAX_SAFE_INTEGER}`);
+          authBackoffMs =
+            authBackoffMs === 0
+              ? Math.min(AUTH_BACKOFF_BASE_MS, PAUSE_MAX_MS)
+              : Math.min(authBackoffMs * 2, PAUSE_MAX_MS);
+          // The collector's own word on when to come back wins. The backoff
+          // still advances under it, so a collector that sends one only
+          // some of the time cannot hold the retries at the flush cadence.
+          pausedUntil = Date.now() + (retryAfterMs(response) ?? authBackoffMs);
+          // The slot is left alone until then, which a final flush would
+          // otherwise read as a send still in progress.
+          parentPort.postMessage(`${pausedPrefix}${pausedUntil}`);
 
           // Said plainly, and once. The batch is well-formed and the
           // credentials are not accepted for this application; left as a
@@ -528,25 +569,27 @@ export const detachedObserveWorker = (
           if (authRejections === 1) {
             parentPort.postMessage(
               `Error: Telemetry rejected (${response.status}). Check that appKey and appSecret are valid; ` +
-                `the application is taken from the key. Credentials are read once at start-up, so this ` +
-                `will not recover without a restart - further rejections are counted, not logged.`,
+                `the application is taken from the key. Credentials are read once at start-up, so fixing them ` +
+                `takes a restart. Until then sends back off to one attempt an hour and batches in between are ` +
+                `dropped - further rejections are counted, not logged.`,
             );
           } else if (authRejections % AUTH_REJECTION_REPORT_EVERY === 0) {
             // A periodic reminder, rare enough not to bury anything. Without
-            // it a process that has been dropping telemetry for a day looks
+            // it a process that has been dropping telemetry for weeks looks
             // exactly like one that is healthy.
             parentPort.postMessage(
-              `Error: Telemetry still rejected (${response.status}); ${authRejections} batches dropped since start-up.`,
+              `Error: Telemetry still rejected (${response.status}); ${authRejections} attempts refused since ` +
+                `start-up, and every batch in between was dropped.`,
             );
           }
           return true;
         }
         if (response.status === 429) {
-          const pauseMs = rateLimitPauseMs(response);
-          rateLimitedUntil = Date.now() + pauseMs;
+          const pauseMs = retryAfterMs(response) ?? RATE_LIMIT_PAUSE_MS;
+          pausedUntil = Date.now() + pauseMs;
           // The slot is left alone until then, which a final flush would
           // otherwise read as a send still in progress.
-          parentPort.postMessage(`${pausedPrefix}${rateLimitedUntil}`);
+          parentPort.postMessage(`${pausedPrefix}${pausedUntil}`);
 
           // The body says which refusal this is - a quota, a quota frozen by
           // a declined payment, or a rate cap - and each needs a different
@@ -581,6 +624,10 @@ export const detachedObserveWorker = (
         );
         return true;
       }
+
+      // Accepted, so whatever refused these credentials no longer does: a
+      // later rejection starts the backoff over from the flush interval.
+      authBackoffMs = 0;
 
       /*
        * The collector answers 200 while it is discarding the spans in the

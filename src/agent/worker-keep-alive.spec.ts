@@ -48,6 +48,7 @@ const startWorker = (endpoint: string) => {
       endpoint,
       appKey: "k",
       appSecret: "s",
+      flushInterval: 5000,
     }),
   });
 

@@ -116,6 +116,29 @@ describe("ObserveAgentWorker options", () => {
       expect(flush).toHaveBeenCalledTimes(1);
     });
 
+    it("settles the interval before the worker starts, which backs off from it", () => {
+      // The worker's first pause after rejected credentials is one flush
+      // interval, read when it starts - so the clamp has to come first, or a
+      // `flushInterval: 50` would back off from 50ms.
+      vi.useFakeTimers();
+      build({ flushInterval: 50 });
+      let seenAtStart: number | undefined;
+      vi.mocked(worker.initializeWorker).mockImplementation(() => {
+        seenAtStart = (
+          worker as unknown as { options: { flushInterval?: number } }
+        ).options.flushInterval;
+      });
+      vi.spyOn(
+        (worker as unknown as { logger: { warn: (m: string) => void } }).logger,
+        "warn",
+      ).mockImplementation(() => undefined);
+
+      worker.onModuleInit();
+
+      expect(worker.initializeWorker).toHaveBeenCalledTimes(1);
+      expect(seenAtStart).toBe(1000);
+    });
+
     it("defaults to five seconds when the option is not set", () => {
       const { flush, warn } = armFlush({});
 

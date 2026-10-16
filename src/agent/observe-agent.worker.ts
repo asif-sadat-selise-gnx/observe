@@ -117,7 +117,8 @@ export class ObserveAgentWorker implements OnModuleInit, OnApplicationShutdown {
   private shutdownPromise: Promise<void> | null = null;
   /**
    * Until when the worker has said it will send nothing (epoch ms) - after a
-   * 429, or for good after rejected credentials. Read by the final flush only.
+   * 429 or rejected credentials, until that pause lapses. Read by the final
+   * flush only.
    */
   private sendsPausedUntil = 0;
 
@@ -133,6 +134,21 @@ export class ObserveAgentWorker implements OnModuleInit, OnApplicationShutdown {
   ) {}
 
   onModuleInit() {
+    // Settled before the worker starts, which backs off from this interval
+    // after rejected credentials - as does a worker restarted later on.
+    let flushIntervalTime =
+      this.options.flushInterval ?? DEFAULT_FLUSH_INTERVAL;
+    if (flushIntervalTime < MIN_FLUSH_INTERVAL) {
+      this.logger.warn(
+        `Flush interval is too short (${flushIntervalTime}ms). Setting to minimum of ${MIN_FLUSH_INTERVAL}ms.`,
+      );
+      // Clamp the value the timer is armed with, not just the recorded option:
+      // the warning above used to be a lie, and a `flushInterval: 50` flushed
+      // twenty times a second while claiming it had been raised to 1s.
+      flushIntervalTime = MIN_FLUSH_INTERVAL;
+      this.options.flushInterval = MIN_FLUSH_INTERVAL;
+    }
+
     if (this.hasScaffoldCredentials) {
       // Nothing is sent, so there is no worker to start. The flush timer below
       // still runs and empties the buffer, which the instrumentation keeps
@@ -158,18 +174,6 @@ export class ObserveAgentWorker implements OnModuleInit, OnApplicationShutdown {
       this.initializeWorker();
     }
 
-    let flushIntervalTime =
-      this.options.flushInterval ?? DEFAULT_FLUSH_INTERVAL;
-    if (flushIntervalTime < MIN_FLUSH_INTERVAL) {
-      this.logger.warn(
-        `Flush interval is too short (${flushIntervalTime}ms). Setting to minimum of ${MIN_FLUSH_INTERVAL}ms.`,
-      );
-      // Clamp the value the timer is armed with, not just the recorded option:
-      // the warning above used to be a lie, and a `flushInterval: 50` flushed
-      // twenty times a second while claiming it had been raised to 1s.
-      flushIntervalTime = MIN_FLUSH_INTERVAL;
-      this.options.flushInterval = MIN_FLUSH_INTERVAL;
-    }
     this.flushInterval = setInterval(() => this.flush(), flushIntervalTime);
 
     if (!this.sendsNothing) {
@@ -628,6 +632,8 @@ export class ObserveAgentWorker implements OnModuleInit, OnApplicationShutdown {
         endpoint: this.endpoint,
         appKey: this.options.appKey,
         appSecret: this.options.appSecret,
+        // Clamped by `onModuleInit` before the first worker starts.
+        flushInterval: this.options.flushInterval ?? DEFAULT_FLUSH_INTERVAL,
       }),
     });
     this.watchWorker(this.worker);
