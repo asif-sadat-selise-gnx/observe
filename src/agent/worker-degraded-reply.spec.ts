@@ -123,11 +123,27 @@ describe("what the detached worker makes of an accepted batch's reply", () => {
       { degraded: true, trimmed: true },
       "trimmed",
     ],
+    [
+      "paced",
+      "a paced Free account's reply",
+      { degraded: true, paced: true },
+      "paced",
+    ],
     ["false", "a reply keeping every span", { degraded: false }, "full"],
     ["false", "a reply with no body", undefined, "full"],
-    // `trimmed` says why spans are discarded, never whether: `degraded` alone
-    // decides that, as it always has.
+    // `trimmed` and `paced` say why spans are discarded, never whether:
+    // `degraded` alone decides that, as it always has.
     ["false", "`trimmed` without `degraded`", { trimmed: true }, "full"],
+    ["false", "`paced` without `degraded`", { paced: true }, "full"],
+    // The collector never sends both. Should one, `trimmed` wins, in the order
+    // the collector checks them: the reading that promises nothing about
+    // 00:00 UTC.
+    [
+      "trimmed",
+      "a reply carrying both `trimmed` and `paced`",
+      { degraded: true, trimmed: true, paced: true },
+      "trimmed",
+    ],
   ])(
     "posts `%s` for %s",
     async (value, _reply, body, mode) => {

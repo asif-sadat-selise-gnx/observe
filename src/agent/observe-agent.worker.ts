@@ -638,7 +638,8 @@ export class ObserveAgentWorker implements OnModuleInit, OnApplicationShutdown {
    * worth opening - server errors, slow requests, failed jobs - still are.
    */
   private applyIngestMode(mode: IngestMode) {
-    // Reduced and trimmed withhold the same trees; only the notice differs.
+    // Reduced, trimmed and paced withhold the same trees; only the notice
+    // differs.
     this.observeAgentSharedBuffer.setDegraded(mode !== "full");
 
     if (mode === this.reportedMode) {
@@ -655,6 +656,14 @@ export class ObserveAgentWorker implements OnModuleInit, OnApplicationShutdown {
         "Observe: traces are now trimmed past this account's threshold to keep its bill down. " +
           "Requests, jobs and errors are still recorded, and server errors, slow requests and failed jobs keep their full traces. " +
           'To keep every trace, turn on "Keep full traces" at /dashboard/billing/usage.',
+      );
+    } else if (mode === "paced") {
+      // Not the reduced line: the allowance is not spent, and the spans come
+      // back at midnight UTC without the operator doing anything.
+      this.logger.warn(
+        "Observe: this account's day passed the Free plan's daily limit, so most traces arrive without their spans until 00:00 UTC. " +
+          "Requests, jobs and errors are still recorded, and server errors, slow requests and failed jobs keep their full traces. " +
+          "See /dashboard/billing/usage.",
       );
     } else {
       this.logger.log("Observe: spans are being recorded again.");
