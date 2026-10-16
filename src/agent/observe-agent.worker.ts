@@ -35,10 +35,16 @@ const MIN_RUNTIME_METRICS_INTERVAL = 30000; // 30 seconds
 const DEFAULT_FLUSH_INTERVAL = 5000; // 5 seconds
 
 /**
+ * The hosted collector. Unlike a collector in placeholder mode, it accepts
+ * nothing without credentials.
+ */
+const HOSTED_COLLECTOR_ENDPOINT = "https://observe-api.nestjs.com";
+
+/**
  * Where signals are posted when `endpoint` is not configured.
  */
 const DEFAULT_COLLECTOR_ENDPOINT =
-  process.env.OBSERVE_ENDPOINT ?? "https://observe-api.nestjs.com";
+  process.env.OBSERVE_ENDPOINT ?? HOSTED_COLLECTOR_ENDPOINT;
 const MIN_FLUSH_INTERVAL = 1000; // 1 second
 
 /**
@@ -135,6 +141,19 @@ export class ObserveAgentWorker implements OnModuleInit, OnApplicationShutdown {
         `Observe is installed but not connected yet: appKey and appSecret are still the placeholders from nest new, so no telemetry is sent. ` +
           `See what this app will look like: ${DEMO_URL} - then create a free account at ${SIGN_UP_URL} for your own key and secret.`,
       );
+    } else if (this.lacksHostedCredentials) {
+      // The same arrangement, said as a warning: this is a deployment missing
+      // its configuration, not a project fresh from the generator.
+      const unset =
+        !this.options.appKey && !this.options.appSecret
+          ? "appKey and appSecret are"
+          : !this.options.appKey
+            ? "appKey is"
+            : "appSecret is";
+      this.logger.warn(
+        `Observe is installed but sends nothing: ${unset} not set, and the hosted collector accepts no telemetry without a key and a secret. ` +
+          `If they come from the environment, check that both variables reach this process, then restart it. Create a key and secret at ${SIGN_UP_URL}.`,
+      );
     } else {
       this.initializeWorker();
     }
@@ -153,7 +172,7 @@ export class ObserveAgentWorker implements OnModuleInit, OnApplicationShutdown {
     }
     this.flushInterval = setInterval(() => this.flush(), flushIntervalTime);
 
-    if (!this.hasScaffoldCredentials) {
+    if (!this.sendsNothing) {
       this.startRuntimeMetrics();
     }
 
@@ -321,8 +340,9 @@ export class ObserveAgentWorker implements OnModuleInit, OnApplicationShutdown {
       this.cpuProfiler = null;
     }
 
-    // No worker - scaffold credentials, or never started - means nothing was
-    // ever going to be sent, so there is nothing to flush either.
+    // No worker - placeholder or missing credentials, or never started -
+    // means nothing was ever going to be sent, so there is nothing to flush
+    // either.
     const worker = this.worker;
     if (!worker) {
       return;
@@ -519,6 +539,46 @@ export class ObserveAgentWorker implements OnModuleInit, OnApplicationShutdown {
     );
   }
 
+  /**
+   * Whether credentials are missing and the collector is the hosted one,
+   * which answers every batch without them with a 401.
+   *
+   * The worker leaves both headers off when either half is unset, which a
+   * collector in placeholder mode accepts, so a collector of the user's own
+   * still gets those batches. The hosted collector refuses them for as long
+   * as the process runs: on 2026-10-15 that was 42% of the 1.87M batches it
+   * refused, from processes deployed without their environment variables,
+   * some of them posting every five seconds for weeks.
+   */
+  private get lacksHostedCredentials(): boolean {
+    return (
+      (!this.options.appKey || !this.options.appSecret) &&
+      this.isHostedCollector
+    );
+  }
+
+  /**
+   * Whether `endpoint` - set, from `OBSERVE_ENDPOINT`, or the default - is the
+   * hosted collector. Compared by host, so a trailing slash or a capital
+   * letter cannot pass it off as a collector of the user's own.
+   */
+  private get isHostedCollector(): boolean {
+    try {
+      return (
+        new URL(this.endpoint).hostname ===
+        new URL(HOSTED_COLLECTOR_ENDPOINT).hostname
+      );
+    } catch {
+      // Not a URL at all; the worker says so when it tries to send.
+      return false;
+    }
+  }
+
+  /** Whether nothing will be sent, so there is no worker to feed. */
+  private get sendsNothing(): boolean {
+    return this.hasScaffoldCredentials || this.lacksHostedCredentials;
+  }
+
   private get endpoint(): string {
     return this.options.endpoint ?? DEFAULT_COLLECTOR_ENDPOINT;
   }
@@ -682,7 +742,7 @@ export class ObserveAgentWorker implements OnModuleInit, OnApplicationShutdown {
     // them until shutdown.
     this.observeAgentSharedBuffer.drainPendingLogs();
 
-    if (this.hasScaffoldCredentials) {
+    if (this.sendsNothing) {
       this.observeAgentSharedBuffer.resetMainThreadBuffer();
       return;
     }
