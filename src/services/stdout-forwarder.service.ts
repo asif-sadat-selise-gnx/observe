@@ -8,6 +8,8 @@ import {
 import { AsyncLocalStorage } from "async_hooks";
 import { ObserveAgentSharedBuffer } from "../agent/observe-agent.shared-buffer.js";
 import { ObserveModuleOptionsWithDefaults } from "../interfaces/index.js";
+import { REQUEST_ID_PATTERN } from "../utils/default-trace-id-generator.util.js";
+import { fitToLength } from "../utils/fit-to-length.util.js";
 import { parseLogLine } from "../utils/log-line.parser.js";
 import { LogRedactor } from "../utils/log-redactor.js";
 import { CALLER_METADATA_KEY, OBSERVE_OPTIONS } from "../observe.constants.js";
@@ -30,7 +32,9 @@ const MAX_PARTIAL_LINE_LENGTH = 8 * 1024;
  * is a set of regular expressions whose cost grows with input length. A single
  * multi-megabyte line - a dumped payload, and payloads can carry content an
  * outside caller chose - must not be able to hold the event loop while every
- * rule walks it.
+ * rule walks it. A bound only helps while that cost stays linear: a pattern
+ * that backtracks super-linearly holds the loop for minutes inside 16 KB, which
+ * is why the parser's patterns are written to be linear.
  *
  * The bound is safe because it is four times what can ship: the shared buffer
  * truncates entries to 4 KB, so bytes beyond this window were never going to
@@ -38,6 +42,12 @@ const MAX_PARTIAL_LINE_LENGTH = 8 * 1024;
  * inside this window, so it is redacted before the cut can split it.
  */
 const MAX_PARSED_LINE_LENGTH = 16 * 1024;
+
+/**
+ * Longest `context` the collector accepts. It does not cut a longer one down:
+ * it refuses the whole batch the line rides in, traces and metrics included.
+ */
+const MAX_CONTEXT_LENGTH = 255;
 
 const FORWARDED_STREAMS = ["stdout", "stderr"] as const;
 type ForwardedStream = (typeof FORWARDED_STREAMS)[number];
@@ -214,7 +224,16 @@ export class StdoutForwarderService implements OnModuleInit, OnModuleDestroy {
     const contextTraceId = store?.get(this.options.traceIdKey);
     // The line's own trace id wins: it was captured when the log was written,
     // whereas the async store is read now and may already have moved on.
-    const traceId = parsed.traceId ?? contextTraceId;
+    //
+    // Only an id shaped like one, though. It is read off text, and anyone who
+    // gets a newline into a logged value can end a line with whatever
+    // `Trace ID:` they like - so it is held to the rule a client-supplied
+    // `x-request-id` is. An over-long one would get the whole batch refused.
+    const lineTraceId =
+      parsed.traceId !== undefined && REQUEST_ID_PATTERN.test(parsed.traceId)
+        ? parsed.traceId
+        : undefined;
+    const traceId = lineTraceId ?? contextTraceId;
 
     return {
       timestamp: Date.now(),
@@ -228,7 +247,10 @@ export class StdoutForwarderService implements OnModuleInit, OnModuleDestroy {
           ? store?.get(CALLER_METADATA_KEY)
           : undefined,
       level: parsed.level,
-      context: parsed.context,
+      context:
+        parsed.context === undefined
+          ? undefined
+          : this.toContext(parsed.context),
       // Redaction happens here, before the entry reaches the shared buffer -
       // which is also before the buffer truncates oversized lines. That order is
       // deliberate: truncating first would cut a long secret in half and ship
@@ -240,5 +262,19 @@ export class StdoutForwarderService implements OnModuleInit, OnModuleDestroy {
         ? this.redactor.redactMessage(parsed.message)
         : parsed.message,
     };
+  }
+
+  /**
+   * A context is normally a class name, but it is read off the line like the
+   * message, so it holds whatever was written there - a secret passed where a
+   * context was expected (`logger.log("login", "token=" + token)`) included.
+   * Redacted as the message is, and before the cut for the same reason, then
+   * cut to what the collector accepts.
+   */
+  private toContext(context: string): string {
+    const redacted = this.redactor
+      ? this.redactor.redactMessage(context)
+      : context;
+    return fitToLength(redacted, MAX_CONTEXT_LENGTH);
   }
 }

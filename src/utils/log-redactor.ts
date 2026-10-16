@@ -106,8 +106,14 @@ function buildDefaultRules(literalValuesOnly = false): CompiledRule[] {
       replace: (replacement, prefix) => `${prefix}${replacement}`,
     },
     // Bare JWTs - they show up outside any header often enough to matter.
+    //
+    // Must not follow a token character, rather than `\b`: a hyphen is a word
+    // boundary but also a token character, so under `\b` every `eyJ` in a run
+    // like `eyJ-eyJ-eyJ-...` started a match that rescanned the rest of the
+    // run - quadratic, on a line a caller can fill.
     {
-      pattern: /\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*/g,
+      pattern:
+        /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*/g,
       replace: (replacement) => replacement,
     },
     // AWS access key ids. Distinctive enough to match on sight; the matching

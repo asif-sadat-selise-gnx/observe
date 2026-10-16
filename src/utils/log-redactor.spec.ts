@@ -124,6 +124,18 @@ describe("LogRedactor", () => {
       expect(output).toContain("[REDACTED]");
     });
 
+    it("scans a run of JWT-like fragments in linear time", () => {
+      // Every line the forwarder ships is redacted synchronously inside
+      // `process.stdout.write`. Quadratic under the JWT pattern this replaced:
+      // ~2s for this input.
+      const line = "eyJ-".repeat(16_384);
+      const startedAt = performance.now();
+
+      redactor.redactMessage(line);
+
+      expect(performance.now() - startedAt).toBeLessThan(250);
+    });
+
     it("masks an AWS access key id", () => {
       const output = redactor.redactMessage("using AKIAIOSFODNN7EXAMPLE now");
 

@@ -151,6 +151,80 @@ describe("StdoutForwarderService", () => {
       });
     });
 
+    it.each([false, true])(
+      "reads the level off every line ConsoleLogger prints (colors: %s)",
+      (colors) => {
+        const service = build();
+        const logger = new ConsoleLogger("Ctx", { colors });
+        // No-ops underneath the patch keep the lines out of the test output
+        // while still exercising the real wrapper.
+        const stdout = vi
+          .spyOn(process.stdout, "write")
+          .mockImplementation(() => true);
+        const stderr = vi
+          .spyOn(process.stderr, "write")
+          .mockImplementation(() => true);
+
+        try {
+          service.start();
+          logger.fatal("a fatal line");
+          logger.error("an error line");
+          logger.warn("a warn line");
+          logger.log("a log line");
+          logger.debug("a debug line");
+          logger.verbose("a verbose line");
+        } finally {
+          service.onModuleDestroy();
+          stdout.mockRestore();
+          stderr.mockRestore();
+        }
+
+        // VERBOSE fills the seven columns Nest right-aligns the level in, so it
+        // is the one level a single space follows the timestamp - and the one
+        // that used to arrive with neither level nor context.
+        expect(
+          buffer.entries.map((entry) => [
+            entry.level,
+            entry.context,
+            entry.text,
+          ]),
+        ).toEqual([
+          ["fatal", "Ctx", "a fatal line"],
+          ["error", "Ctx", "an error line"],
+          ["warn", "Ctx", "a warn line"],
+          ["log", "Ctx", "a log line"],
+          ["debug", "Ctx", "a debug line"],
+          ["verbose", "Ctx", "a verbose line"],
+        ]);
+      },
+    );
+
+    it("cuts a context to the length the collector accepts", () => {
+      const service = build();
+
+      write(
+        service,
+        `[Nest] 1  - 07/29/2026, 10:42:18 AM     LOG [${"A".repeat(300)}] done\n`,
+      );
+
+      // It refuses the whole batch over a longer one, traces and metrics
+      // included.
+      expect(buffer.entries[0].context).toHaveLength(255);
+      expect(buffer.entries[0].text).toBe("done");
+    });
+
+    it("maps another logger's level onto one the collector accepts", () => {
+      const service = build();
+
+      write(
+        service,
+        `${JSON.stringify({ level: "info", message: "order placed" })}\n`,
+      );
+
+      // `info` as it was would get the whole batch refused.
+      expect(buffer.entries[0].level).toBe("log");
+    });
+
     it("forwards an unrecognised line with its full text", () => {
       const service = build();
 
@@ -225,6 +299,37 @@ describe("StdoutForwarderService", () => {
       expect(buffer.entries[0].spanId).toBeUndefined();
     });
 
+    it.each([
+      ["longer than the collector accepts", "T".repeat(300)],
+      ["made of characters no trace id is", "trace#1"],
+    ])(
+      "falls back to the store when the line's trace id is %s",
+      (_, lineTraceId) => {
+        const service = build();
+
+        als.run(
+          new Map([
+            [TRACE_ID_KEY, "trace-from-store"],
+            [CALLER_METADATA_KEY, "span-1"],
+          ]),
+          () =>
+            write(
+              service,
+              `[Nest] 1  - 07/29/2026, 10:42:18 AM     LOG [Ctx] done Trace ID: ${lineTraceId}\n`,
+            ),
+        );
+
+        // Anyone who gets a newline into a logged value can end a line with a
+        // `Trace ID:` of their choosing, so it is held to the rule a client's
+        // `x-request-id` is - and an over-long one would get the whole batch
+        // refused.
+        expect(buffer.entries[0]).toMatchObject({
+          traceId: "trace-from-store",
+          spanId: "span-1",
+        });
+      },
+    );
+
     it("forwards a line written outside any trace", () => {
       const service = build();
 
@@ -260,6 +365,19 @@ describe("StdoutForwarderService", () => {
       );
 
       expect(JSON.stringify(buffer.entries[0])).not.toContain("hunter2");
+    });
+
+    it("redacts the context too", () => {
+      const service = build();
+
+      // Nest takes a trailing string argument as the context, so a secret
+      // passed there lands in the brackets.
+      write(
+        service,
+        "[Nest] 1  - 07/29/2026, 10:42:18 AM     LOG [token=abc123secret] login\n",
+      );
+
+      expect(buffer.entries[0].context).toBe("token=[REDACTED]");
     });
 
     it("is on by default, because forwarding moves logs onto another machine", () => {

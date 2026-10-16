@@ -54,6 +54,37 @@ describe("parseLogLine", () => {
 
       expect(parseLogLine(line).message).toBe(line);
     });
+
+    it.each([
+      ["info", "log"],
+      ["INFO", "log"],
+      ["warning", "warn"],
+      ["trace", "verbose"],
+      ["Error", "error"],
+    ])("maps the level %s onto %s", (written, mapped) => {
+      const parsed = parseLogLine(
+        JSON.stringify({ level: written, message: "order placed" }),
+      );
+
+      // The collector accepts Nest's levels only, and refuses the whole batch
+      // - traces and metrics included - over any other.
+      expect(parsed.level).toBe(mapped);
+    });
+
+    it("keeps a level the collector does not model as an attribute", () => {
+      const named = parseLogLine(
+        JSON.stringify({ level: "notice", message: "disk at 80%" }),
+      );
+      const numeric = parseLogLine(
+        JSON.stringify({ level: 30, message: "disk at 80%" }),
+      );
+
+      // It cannot ride in `level`, but it is still what the line said.
+      expect(named.level).toBeUndefined();
+      expect(named.attributes).toEqual({ level: "notice" });
+      expect(numeric.level).toBeUndefined();
+      expect(numeric.attributes).toEqual({ level: 30 });
+    });
   });
 
   describe("Nest text lines", () => {
@@ -97,6 +128,21 @@ describe("parseLogLine", () => {
       expect(parsed.level).toBe(normalised);
     });
 
+    it("recognises VERBOSE as Nest prints it", () => {
+      // Nest right-aligns the level in seven columns, and VERBOSE fills all
+      // seven - one space after the timestamp, where every other level gets
+      // several.
+      const parsed = parseLogLine(
+        "[Nest] 1234  - 07/29/2026, 10:42:18 AM VERBOSE [CacheService] warmed",
+      );
+
+      expect(parsed).toMatchObject({
+        level: "verbose",
+        context: "CacheService",
+        message: "warmed",
+      });
+    });
+
     it("keeps a multi-line message intact", () => {
       const parsed = parseLogLine(
         "[Nest] 1  - 07/29/2026, 10:42:18 AM     ERROR [Ctx] failed\n  at foo\n  at bar",
@@ -117,6 +163,71 @@ describe("parseLogLine", () => {
       // so the suffix is how the trace survives.
       expect(parsed.traceId).toBe("abc-123");
       expect(parsed.message).not.toContain("Trace ID");
+    });
+
+    it.each([
+      ["no space after the marker", "done Trace ID:abc-123", "done"],
+      ["nothing before the marker", "Trace ID: abc-123", ""],
+      [
+        "an earlier marker in the message",
+        "retried Trace ID: old Trace ID: abc-123",
+        "retried Trace ID: old",
+      ],
+    ])("recovers the suffix with %s", (_, rest, message) => {
+      const parsed = parseLogLine(
+        `[Nest] 1  - 07/29/2026, 10:42:18 AM     LOG [Ctx] ${rest}`,
+      );
+
+      expect(parsed.traceId).toBe("abc-123");
+      expect(parsed.message).toBe(message);
+    });
+
+    it("leaves a marker followed by more than one token in the message", () => {
+      const parsed = parseLogLine(
+        "[Nest] 1  - 07/29/2026, 10:42:18 AM     LOG [Ctx] see Trace ID: abc for details",
+      );
+
+      // Only a suffix is the logger's; this is the message talking.
+      expect(parsed.traceId).toBeUndefined();
+      expect(parsed.message).toBe("see Trace ID: abc for details");
+    });
+  });
+
+  describe("pathological lines", () => {
+    /**
+     * Parsing runs synchronously inside `process.stdout.write`, so its cost is
+     * the event loop's - and whoever gets text into a logged value shapes the
+     * line. Every case here held the loop under the patterns this replaced.
+     */
+    const expectLinear = (line: string) => {
+      const startedAt = performance.now();
+
+      parseLogLine(line);
+
+      expect(performance.now() - startedAt).toBeLessThan(250);
+    };
+
+    it.each([
+      ["spaces", " "],
+      ["tabs", "\t"],
+    ])("rejects a [Nest] line that runs into %s in linear time", (_, unit) => {
+      // Cubic under the pattern this replaced: ~15s for this input.
+      expectLinear(`[Nest] 1 - ${unit.repeat(3_000)}x`);
+    });
+
+    it("parses a level line carrying a long run of whitespace in linear time", () => {
+      // Quadratic under the trace id pattern this replaced: ~9s for this input.
+      expectLinear(
+        `[Nest] 1  - 07/29/2026, 10:42:18 AM     LOG [Ctx] q=${" ".repeat(64_000)}x`,
+      );
+    });
+
+    it("parses a VERBOSE line carrying a long run of whitespace in linear time", () => {
+      // Quadratic under the pattern this replaced, which never found the level
+      // and scanned the whole run for one: ~8s for this input.
+      expectLinear(
+        `[Nest] 1  - 07/29/2026, 10:42:18 AM VERBOSE [Ctx] q=${" ".repeat(64_000)}x`,
+      );
     });
   });
 
