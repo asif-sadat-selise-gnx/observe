@@ -421,6 +421,38 @@ describe("MSSQL statement sanitization", () => {
     expect(h.nodes[0].tags?.["db.statement"]).toBe(expected);
   });
 
+  it.each(["query", "batch"] as const)(
+    "redacts named and positional bare EXEC arguments from %s calls",
+    async (method) => {
+      const h = harness();
+      await h.run(() =>
+        new h.Request()[method](
+          "EXEC dbo.Authenticate @password = PrivateToken123",
+        ),
+      );
+      await h.run(() =>
+        new h.Request()[method]("EXEC dbo.Authenticate PrivateToken456"),
+      );
+      expect(h.nodes.map((node) => node.tags?.["db.statement"])).toEqual([
+        "EXEC dbo.Authenticate ?",
+        "EXEC dbo.Authenticate ?",
+      ]);
+      expect(JSON.stringify(h.nodes)).not.toMatch(/PrivateToken/);
+    },
+  );
+
+  it("redacts EXEC arguments in a multi-statement batch", async () => {
+    const h = harness();
+    await h.run(() =>
+      new h.Request().batch(
+        "SELECT 1; EXEC dbo.Authenticate PrivateToken123; SELECT 2",
+      ),
+    );
+    expect(h.nodes[0].tags?.["db.statement"]).toBe(
+      "SELECT ?; EXEC dbo.Authenticate ?; SELECT ?",
+    );
+  });
+
   it.each([undefined, true, false])(
     "respects enableQuotedIdentifier=%s for pool, transaction and prepared-statement requests",
     async (enableQuotedIdentifier) => {

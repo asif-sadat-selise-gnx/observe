@@ -13,7 +13,11 @@ interface MssqlRequest extends EventEmitter {
   };
 }
 
-function describeMssqlStatement(sql: string, enableQuotedIdentifier: boolean) {
+function describeMssqlStatement(
+  sql: string,
+  enableQuotedIdentifier: boolean,
+  redactExecArgs = true,
+) {
   const input = sql.slice(0, 8192);
   let text = "";
   // T-SQL escapes quotes by doubling them, not with backslashes. Tokenizing
@@ -54,7 +58,93 @@ function describeMssqlStatement(sql: string, enableQuotedIdentifier: boolean) {
       text += token[0];
     }
   }
-  return describeSanitizedSqlStatement(text);
+  return describeSanitizedSqlStatement(
+    redactExecArgs ? redactExecArguments(text) : text,
+  );
+}
+
+function redactExecArguments(sql: string): string {
+  const findExec = (start: number) => {
+    for (let index = start; index < sql.length; ) {
+      if (sql[index] === "[" || sql[index] === '"') {
+        const opening = sql[index];
+        const closing = opening === "[" ? "]" : '"';
+        index++;
+        while (index < sql.length) {
+          if (sql[index] === closing) {
+            if (sql[index + 1] === closing) {
+              index += 2;
+              continue;
+            }
+            index++;
+            break;
+          }
+          index++;
+        }
+        continue;
+      }
+      const match = /^EXEC(?:UTE)?\b/i.exec(sql.slice(index));
+      if (
+        match &&
+        (index === 0 || !/[\w@$#]/.test(sql[index - 1])) &&
+        !/[\w@$#]/.test(sql[index + match[0].length] ?? "")
+      ) {
+        return { index, length: match[0].length };
+      }
+      index++;
+    }
+    return undefined;
+  };
+
+  let text = sql;
+  let searchFrom = 0;
+  while (searchFrom < text.length) {
+    const exec = findExec(searchFrom);
+    if (!exec) {
+      break;
+    }
+    let end = exec.index + exec.length;
+    let inBracket = false;
+    let inQuotedIdentifier = false;
+    while (end < text.length) {
+      if (inBracket) {
+        if (text[end] === "]" && text[end + 1] === "]") {
+          end += 2;
+          continue;
+        }
+        if (text[end] === "]") inBracket = false;
+      } else if (inQuotedIdentifier) {
+        if (text[end] === '"' && text[end + 1] === '"') {
+          end += 2;
+          continue;
+        }
+        if (text[end] === '"') inQuotedIdentifier = false;
+      } else if (text[end] === "[") {
+        inBracket = true;
+      } else if (text[end] === '"') {
+        inQuotedIdentifier = true;
+      } else if (text[end] === ";") {
+        break;
+      }
+      end++;
+    }
+
+    const tail = text.slice(exec.index + exec.length, end);
+    const procedure =
+      /^\s+(?:@[A-Za-z_]\w*\s*=\s*)?(?:\[(?:[^\]]|\]\])*\]|"(?:[^"]|"")*"|[A-Za-z_@$#][\w@$#]*)(?:\s*\.\s*(?:\[(?:[^\]]|\]\])*\]|"(?:[^"]|"")*"|[A-Za-z_@$#][\w@$#]*))*/.exec(
+        tail,
+      );
+    if (tail.trim()) {
+      const prefix = procedure
+        ? text.slice(exec.index, exec.index + exec.length + procedure[0].length)
+        : text.slice(exec.index, exec.index + exec.length);
+      text = `${text.slice(0, exec.index)}${prefix} ?${text.slice(end)}`;
+      searchFrom = exec.index + prefix.length + 2;
+    } else {
+      searchFrom = end + 1;
+    }
+  }
+  return text;
 }
 
 /**
@@ -74,6 +164,7 @@ export function patchMssql(
       const { operation, statement } = describeMssqlStatement(
         method === "_execute" ? `EXEC ${command}` : command,
         this.parent?.config?.options?.enableQuotedIdentifier !== false,
+        method !== "_execute",
       );
       const span = recorder.open(
         "mssql",
