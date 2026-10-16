@@ -352,7 +352,7 @@ Every option, with its default. The [documentation](https://www.observe.nestjs.c
 | `traceIdGenerator`    | the `x-request-id` header, else a UUIDv7 | Gives each request its trace id.                                                                                                                                                                     |
 | `traceIdKey`          | `'traceId'`                              | The key the trace id is stored under in the request context.                                                                                                                                         |
 | `attachTraceIdToLogs` | `true`                                   | Adds the trace id to the `ConsoleLogger`'s own output, on Nest 11.2 and later. Sending lines to the dashboard is `forwardLogs`.                                                                       |
-| `skipInstrumentation` | `() => false`                            | Returns `true` for a provider instance that must not be instrumented.                                                                                                                                |
+| `skipInstrumentation` | `() => false`                            | Returns `true` for a provider instance that must not be instrumented. Nest's `Reflector` never is, whatever this returns.                                                                            |
 
 ## Optional peer dependencies
 
