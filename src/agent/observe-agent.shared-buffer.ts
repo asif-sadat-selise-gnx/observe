@@ -142,7 +142,7 @@ interface AgentMetricsPayload {
   objectives?: ObjectiveDeclaration[];
   /**
    * Spans built and then withheld because the collector reported this
-   * account's ingestion is reduced.
+   * account's ingestion is reduced, trimmed or paced.
    *
    * Reported because it cannot be inferred: the trees are not sent, so the
    * collector has no way to count the volume it is meant to be measuring the

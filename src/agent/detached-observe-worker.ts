@@ -578,12 +578,12 @@ export const detachedObserveWorker = (
 
       /*
        * The collector answers 200 while it is discarding the spans in the
-       * batch - an account past its plan's allowance, or a paying one past
-       * its trim threshold, keeps its requests, jobs and errors and loses the
-       * trace trees of all but its notable traces. Nothing in the status says
-       * so, so the body is the only way to learn it, and an agent that does
-       * not look keeps building, serializing and gzipping trees that die on
-       * arrival.
+       * batch - an account past its plan's allowance, a paying one past its
+       * trim threshold, or a Free one whose day passed its daily limit, keeps
+       * its requests, jobs and errors and loses the trace trees of all but
+       * its notable traces. Nothing in the status says so, so the body is the
+       * only way to learn it, and an agent that does not look keeps building,
+       * serializing and gzipping trees that die on arrival.
        *
        * Read defensively and treated as absent on anything unexpected: an
        * older collector returns no body at all, and a parse failure here must
@@ -592,16 +592,23 @@ export const detachedObserveWorker = (
       const accepted: unknown = await response.json().catch(() => undefined);
       const reply = (
         typeof accepted === "object" && accepted !== null ? accepted : {}
-      ) as { degraded?: unknown; trimmed?: unknown };
-      // `false`, `true` or `trimmed`. `trimmed` says only why the spans are
-      // discarded, so it counts only beside `degraded`; a collector that never
-      // sends it gets exactly the line it always did.
+      ) as { degraded?: unknown; trimmed?: unknown; paced?: unknown };
+      // `false`, `true`, `trimmed` or `paced`. `trimmed` and `paced` say only
+      // why the spans are discarded, so they count only beside `degraded`; a
+      // collector that sends neither gets exactly the line it always did.
+      //
+      // The collector never sends both - trimming is a paying account's, pacing
+      // a Free one's. Should a reply carry both, `trimmed` wins, in the order
+      // the collector itself checks them: it is the paying account's reading,
+      // and the one that promises nothing about 00:00 UTC.
       const verdict =
         reply.degraded !== true
           ? "false"
           : reply.trimmed === true
             ? "trimmed"
-            : "true";
+            : reply.paced === true
+              ? "paced"
+              : "true";
 
       // A protocol line, not prose: the parent keys off the prefix and the
       // value, and is the side that decides what to do about it.

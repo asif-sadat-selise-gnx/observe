@@ -7,7 +7,8 @@
  * parent logs - and a second message shape would have to be threaded through
  * the same handler anyway. Parsed in exactly one place on each side.
  *
- * The value after it is `false`, `true`, or `trimmed` - see `IngestMode`.
+ * The value after it is `false`, `true`, `trimmed` or `paced` - see
+ * `IngestMode`.
  */
 export const DEGRADED_MESSAGE_PREFIX = "observe:degraded=";
 
@@ -19,21 +20,25 @@ export const DEGRADED_MESSAGE_PREFIX = "observe:degraded=";
  *   ingest - and only notable traces keep their spans.
  * - `trimmed`: a paying account past its threshold has its traces trimmed by
  *   the same rule, to keep its bill down.
+ * - `paced`: a Free account still inside its allowance whose UTC day passed a
+ *   tenth of it has its traces held back by the same rule until 00:00 UTC, so
+ *   one busy day cannot spend the month.
  *
- * Both of the last two withhold exactly the same trees; they differ only in
- * why, which is what the operator is told and what they can do about it.
+ * The last three withhold exactly the same trees; they differ only in why,
+ * which is what the operator is told and what they can do about it.
  */
-export type IngestMode = "full" | "reduced" | "trimmed";
+export type IngestMode = "full" | "reduced" | "trimmed" | "paced";
 
 /**
  * How long the main thread keeps withholding spans after the last batch that
  * reported degradation.
  *
  * The state is advisory and the collector never announces the end of it: an
- * upgrade or the turn of the billing period simply starts keeping spans
- * again. So it expires on its own, and the cost of it being briefly stale is
- * one flush of spans sent and discarded - against a restart being required to
- * recover, which is what a sticky flag would have cost.
+ * upgrade, the turn of the billing period or, for a paced day, 00:00 UTC
+ * simply starts keeping spans again. So it expires on its own, and the cost
+ * of it being briefly stale is one flush of spans sent and discarded - against
+ * a restart being required to recover, which is what a sticky flag would have
+ * cost.
  */
 export const DEGRADED_TTL_MS = 5 * 60 * 1000;
 
@@ -41,8 +46,8 @@ export const DEGRADED_TTL_MS = 5 * 60 * 1000;
  * The worker's line for one batch, or null if this is not that line.
  *
  * `true` and `false` are what the line has always carried, and they mean what
- * they always did; `trimmed` is the one addition. Anything else reads as
- * `full`, as every value but `true` always has.
+ * they always did; `trimmed` and `paced` are the additions. Anything else
+ * reads as `full`, as every value but `true` always has.
  */
 export function parseDegradedMessage(msg: string): IngestMode | null {
   if (!msg.startsWith(DEGRADED_MESSAGE_PREFIX)) {
@@ -53,6 +58,8 @@ export function parseDegradedMessage(msg: string): IngestMode | null {
       return "reduced";
     case "trimmed":
       return "trimmed";
+    case "paced":
+      return "paced";
     default:
       return "full";
   }

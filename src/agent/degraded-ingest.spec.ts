@@ -26,12 +26,24 @@ describe("the degraded-ingest protocol", () => {
     );
   });
 
+  it("tells a Free account's paced day apart from a spent allowance", () => {
+    // Inside its allowance, held back only until 00:00 UTC: read as
+    // `reduced`, the operator is told the month is gone when it is not.
+    expect(parseDegradedMessage(`${DEGRADED_MESSAGE_PREFIX}paced`)).toBe(
+      "paced",
+    );
+  });
+
   it("reads any other value as full ingest, as it always has", () => {
     // Withholding spans on a value nobody defined would lose waterfalls the
     // collector was still keeping, silently.
     expect(parseDegradedMessage(DEGRADED_MESSAGE_PREFIX)).toBe("full");
     expect(parseDegradedMessage(`${DEGRADED_MESSAGE_PREFIX}TRUE`)).toBe("full");
     expect(parseDegradedMessage(`${DEGRADED_MESSAGE_PREFIX}trim`)).toBe("full");
+    expect(parseDegradedMessage(`${DEGRADED_MESSAGE_PREFIX}PACED`)).toBe(
+      "full",
+    );
+    expect(parseDegradedMessage(`${DEGRADED_MESSAGE_PREFIX}pace`)).toBe("full");
   });
 
   it("ignores every other line the worker posts", () => {

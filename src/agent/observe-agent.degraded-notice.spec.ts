@@ -6,7 +6,7 @@ import { ObserveAgentSharedBuffer } from "./observe-agent.shared-buffer.js";
 import { ObserveAgentWorker } from "./observe-agent.worker.js";
 
 /** The worker's line for one batch, as detached-observe-worker.ts posts it. */
-const verdict = (value: "true" | "false" | "trimmed") =>
+const verdict = (value: "true" | "false" | "trimmed" | "paced") =>
   `${DEGRADED_MESSAGE_PREFIX}${value}`;
 
 const REDUCED_NOTICE =
@@ -18,6 +18,11 @@ const TRIMMED_NOTICE =
   "Observe: traces are now trimmed past this account's threshold to keep its bill down. " +
   "Requests, jobs and errors are still recorded, and server errors, slow requests and failed jobs keep their full traces. " +
   'To keep every trace, turn on "Keep full traces" at /dashboard/billing/usage.';
+
+const PACED_NOTICE =
+  "Observe: this account's day passed the Free plan's daily limit, so most traces arrive without their spans until 00:00 UTC. " +
+  "Requests, jobs and errors are still recorded, and server errors, slow requests and failed jobs keep their full traces. " +
+  "See /dashboard/billing/usage.";
 
 const RECOVERED_NOTICE = "Observe: spans are being recorded again.";
 
@@ -85,7 +90,20 @@ describe("ObserveAgentWorker's notice while spans are withheld", () => {
     expect(buffer.isDegraded()).toBe(true);
   });
 
-  it.each(["true", "trimmed"] as const)(
+  it("tells a paced Free account its spans come back at 00:00 UTC, once", () => {
+    const { agent, buffer, warn, log } = boot();
+
+    batches(agent, verdict("paced"));
+
+    // Not the reduced line, which is what 0.3.11 said: a paced account is
+    // inside its allowance, and its spans come back at midnight on their own.
+    expect(warn.mock.calls).toEqual([[PACED_NOTICE]]);
+    expect(log).not.toHaveBeenCalled();
+    // Pacing withholds exactly the trees reduced ingest does.
+    expect(buffer.isDegraded()).toBe(true);
+  });
+
+  it.each(["true", "trimmed", "paced"] as const)(
     "says spans are recorded again when `%s` gives way to full ingest",
     (value) => {
       const { agent, buffer, log } = boot();
@@ -125,6 +143,23 @@ describe("ObserveAgentWorker's notice while spans are withheld", () => {
       [REDUCED_NOTICE],
       [TRIMMED_NOTICE],
     ]);
+    expect(log).not.toHaveBeenCalled();
+    expect(buffer.isDegraded()).toBe(true);
+  });
+
+  it("speaks again when a paced day spends the month", () => {
+    /*
+     * Pacing holds back spans, not requests, jobs or errors, and those still
+     * count toward the allowance: an account near the end of it can spend it
+     * before midnight. Free throughout and the same trees withheld, but the
+     * spans no longer come back at 00:00 UTC.
+     */
+    const { agent, buffer, warn, log } = boot();
+
+    batches(agent, verdict("paced"));
+    batches(agent, verdict("true"));
+
+    expect(warn.mock.calls).toEqual([[PACED_NOTICE], [REDUCED_NOTICE]]);
     expect(log).not.toHaveBeenCalled();
     expect(buffer.isDegraded()).toBe(true);
   });
