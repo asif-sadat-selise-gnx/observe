@@ -441,6 +441,57 @@ describe("MSSQL statement sanitization", () => {
     },
   );
 
+  it.each(["query", "batch"] as const)(
+    "omits statements for implicit procedure calls from %s calls",
+    async (method) => {
+      const h = harness();
+      for (const sql of [
+        "dbo.Authenticate @password = PrivateNamedToken123",
+        "Authenticate PrivatePositionalToken456; SELECT 42",
+        "[SELECT] PrivateBracketedToken",
+        "select$proc PrivateSuffixedToken",
+      ]) {
+        await h.run(() => new h.Request()[method](sql));
+      }
+      expect(h.nodes).toHaveLength(4);
+      for (const node of h.nodes) {
+        expect(node.tags).toEqual({ "db.system": "mssql" });
+      }
+      expect(JSON.stringify(h.nodes)).not.toMatch(/Private/);
+    },
+  );
+
+  it.each([
+    ["SAVE TRANSACTION typeorm_1", "SAVE"],
+    ["ROLLBACK TRANSACTION typeorm_1", "ROLLBACK"],
+    ["DECLARE @t TABLE (id int)", "DECLARE"],
+  ])(
+    "records but does not capture other statements: %s",
+    async (sql, operation) => {
+      const h = harness();
+      await h.run(() => new h.Request().query(sql));
+      expect(h.nodes[0]).toMatchObject({
+        operation,
+        tags: { "db.system": "mssql" },
+      });
+      expect(h.nodes[0].tags).not.toHaveProperty("db.statement");
+    },
+  );
+
+  it.each([
+    ["(SELECT 1) UNION SELECT 2", "(SELECT ?) UNION SELECT ?"],
+    [
+      "with x AS (SELECT 1) SELECT * FROM x",
+      "with x AS (SELECT ?) SELECT * FROM x",
+    ],
+    ["MERGE [t] USING s ON 1 = 1", "MERGE [t] USING s ON ? = ?"],
+    ["execute dbo.Process 1", "execute dbo.Process ?"],
+  ])("captures statements opening with %s", async (sql, statement) => {
+    const h = harness();
+    await h.run(() => new h.Request().query(sql));
+    expect(h.nodes[0].tags?.["db.statement"]).toBe(statement);
+  });
+
   it("redacts EXEC arguments in a multi-statement batch", async () => {
     const h = harness();
     await h.run(() =>
@@ -547,8 +598,9 @@ describe("MSSQL statement sanitization", () => {
     );
     expect(h.nodes[1]).toMatchObject({
       operation: "QUERY",
-      tags: { "db.statement": "" },
+      tags: { "db.system": "mssql" },
     });
+    expect(h.nodes[1].tags).not.toHaveProperty("db.statement");
   });
 });
 

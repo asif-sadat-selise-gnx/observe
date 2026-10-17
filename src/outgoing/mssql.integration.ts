@@ -17,7 +17,7 @@ function describeMssqlStatement(
   sql: string,
   enableQuotedIdentifier: boolean,
   redactExecArgs = true,
-) {
+): { operation: string; statement?: string } {
   const input = sql.slice(0, 8192);
   let text = "";
   // T-SQL escapes quotes by doubling them, not with backslashes. Tokenizing
@@ -58,10 +58,21 @@ function describeMssqlStatement(
       text += token[0];
     }
   }
-  return describeSanitizedSqlStatement(
+  const description = describeSanitizedSqlStatement(
     redactExecArgs ? redactExecArguments(text) : text,
   );
+  return CAPTURED_STATEMENT.test(text)
+    ? description
+    : { operation: description.operation };
 }
+
+/**
+ * A batch may open with a procedure call without EXEC, and its unquoted
+ * arguments look like keywords. Statement text is kept only for batches
+ * opening with these reserved words, which cannot name such a procedure.
+ */
+const CAPTURED_STATEMENT =
+  /^[\s(]*(?:SELECT|INSERT|UPDATE|DELETE|MERGE|WITH|EXEC|EXECUTE)(?![\w@$#])/i;
 
 function findExec(source: string, start: number) {
   for (let index = start; index < source.length; ) {
@@ -168,8 +179,12 @@ export function patchMssql(
       );
       const span = recorder.open(
         "mssql",
-        method === "_execute" ? statement.slice(0, 64) : operation,
-        { "db.system": "mssql", "db.statement": statement },
+        method === "_execute"
+          ? (statement ?? operation).slice(0, 64)
+          : operation,
+        statement === undefined
+          ? { "db.system": "mssql" }
+          : { "db.system": "mssql", "db.statement": statement },
       );
       if (!span) {
         return original.apply(this, args);
