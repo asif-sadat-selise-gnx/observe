@@ -450,10 +450,12 @@ describe("MSSQL statement sanitization", () => {
         "Authenticate PrivatePositionalToken456; SELECT 42",
         "[SELECT] PrivateBracketedToken",
         "select$proc PrivateSuffixedToken",
+        "SELECT客户 @password = PrivateUnicodeNamedToken",
+        "SELECTé PrivateUnicodePositionalToken",
       ]) {
         await h.run(() => new h.Request()[method](sql));
       }
-      expect(h.nodes).toHaveLength(4);
+      expect(h.nodes).toHaveLength(6);
       for (const node of h.nodes) {
         expect(node.tags).toEqual({ "db.system": "mssql" });
       }

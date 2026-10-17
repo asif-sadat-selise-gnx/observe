@@ -72,7 +72,7 @@ function describeMssqlStatement(
  * opening with these reserved words, which cannot name such a procedure.
  */
 const CAPTURED_STATEMENT =
-  /^[\s(]*(?:SELECT|INSERT|UPDATE|DELETE|MERGE|WITH|EXEC|EXECUTE)(?![\w@$#])/i;
+  /^[\s(]*(?:SELECT|INSERT|UPDATE|DELETE|MERGE|WITH|EXEC|EXECUTE)(?![\p{L}\p{M}\p{N}\p{Pc}@$#])/iu;
 
 function findExec(source: string, start: number) {
   for (let index = start; index < source.length; ) {
