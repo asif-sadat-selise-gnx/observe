@@ -19,6 +19,7 @@ function describeMssqlStatement(
   redactExecArgs = true,
 ): { operation: string; statement?: string } {
   const input = sql.slice(0, 8192);
+  const truncated = sql.length > input.length;
   let text = "";
   // T-SQL escapes quotes by doubling them, not with backslashes. Tokenizing
   // first keeps comment markers inside strings and identifiers inert.
@@ -58,12 +59,17 @@ function describeMssqlStatement(
       text += token[0];
     }
   }
+  if (truncated) {
+    text = text.replace(/[\p{L}\p{M}\p{N}_$@#]+$/u, "?");
+  }
   const description = describeSanitizedSqlStatement(
     redactExecArgs ? redactExecArguments(text) : text,
   );
-  return CAPTURED_STATEMENT.test(text)
-    ? description
-    : { operation: description.operation };
+  if (CAPTURED_STATEMENT.test(text)) {
+    return description;
+  }
+  const verb = /^[\s(]*([A-Za-z]+)/.exec(text)?.[1]?.toUpperCase();
+  return { operation: verb ?? "QUERY" };
 }
 
 /**

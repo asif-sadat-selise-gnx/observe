@@ -473,10 +473,31 @@ describe("MSSQL statement sanitization", () => {
       const h = harness();
       await h.run(() => new h.Request().query(sql));
       expect(h.nodes[0]).toMatchObject({
-        operation,
+        operation: operation.toUpperCase(),
         tags: { "db.system": "mssql" },
       });
       expect(h.nodes[0].tags).not.toHaveProperty("db.statement");
+    },
+  );
+
+  it.each(["query", "batch"] as const)(
+    "does not leak procedure arguments through the operation for %s calls",
+    async (method) => {
+      const h = harness();
+      for (const sql of [
+        "SELECT$FROM PrivateToken123",
+        "SELECT$FROM @password = PrivateNamedToken456",
+      ]) {
+        await h.run(() => new h.Request()[method](sql));
+      }
+      expect(h.nodes.map((node) => node.operation)).toEqual([
+        "SELECT",
+        "SELECT",
+      ]);
+      for (const node of h.nodes) {
+        expect(node.tags).toEqual({ "db.system": "mssql" });
+      }
+      expect(JSON.stringify(h.nodes)).not.toMatch(/Private/);
     },
   );
 
@@ -603,6 +624,21 @@ describe("MSSQL statement sanitization", () => {
       tags: { "db.system": "mssql" },
     });
     expect(h.nodes[1].tags).not.toHaveProperty("db.statement");
+  });
+
+  it("redacts a numeric token cut off at the input boundary", async () => {
+    const h = harness();
+    await h.run(() =>
+      new h.Request().query(`SELECT /*${"x".repeat(8173)}*/ 987654e+2`),
+    );
+    expect(h.nodes[0]).toMatchObject({
+      operation: "SELECT",
+      tags: {
+        "db.system": "mssql",
+        "db.statement": "SELECT ?",
+      },
+    });
+    expect(JSON.stringify(h.nodes)).not.toMatch(/987654/);
   });
 });
 
