@@ -453,6 +453,20 @@ describe("MSSQL statement sanitization", () => {
     );
   });
 
+  it.each(["query", "batch"] as const)(
+    "redacts every EXEC argument after a long first argument in %s calls",
+    async (method) => {
+      const h = harness();
+      const firstSecret = "PrivateFirstArgument".repeat(10);
+      const sql = `EXEC dbo.Authenticate ${firstSecret}; EXEC dbo.Authenticate PrivateToken456`;
+      await h.run(() => new h.Request()[method](sql));
+      expect(h.nodes[0].tags?.["db.statement"]).toBe(
+        "EXEC dbo.Authenticate ?; EXEC dbo.Authenticate ?",
+      );
+      expect(JSON.stringify(h.nodes)).not.toMatch(/Private/);
+    },
+  );
+
   it.each([undefined, true, false])(
     "respects enableQuotedIdentifier=%s for pool, transaction and prepared-statement requests",
     async (enableQuotedIdentifier) => {

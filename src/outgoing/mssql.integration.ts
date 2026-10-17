@@ -63,43 +63,43 @@ function describeMssqlStatement(
   );
 }
 
-function redactExecArguments(sql: string): string {
-  const findExec = (start: number) => {
-    for (let index = start; index < sql.length; ) {
-      if (sql[index] === "[" || sql[index] === '"') {
-        const opening = sql[index];
-        const closing = opening === "[" ? "]" : '"';
-        index++;
-        while (index < sql.length) {
-          if (sql[index] === closing) {
-            if (sql[index + 1] === closing) {
-              index += 2;
-              continue;
-            }
-            index++;
-            break;
+function findExec(source: string, start: number) {
+  for (let index = start; index < source.length; ) {
+    if (source[index] === "[" || source[index] === '"') {
+      const opening = source[index];
+      const closing = opening === "[" ? "]" : '"';
+      index++;
+      while (index < source.length) {
+        if (source[index] === closing) {
+          if (source[index + 1] === closing) {
+            index += 2;
+            continue;
           }
           index++;
+          break;
         }
-        continue;
+        index++;
       }
-      const match = /^EXEC(?:UTE)?\b/i.exec(sql.slice(index));
-      if (
-        match &&
-        (index === 0 || !/[\w@$#]/.test(sql[index - 1])) &&
-        !/[\w@$#]/.test(sql[index + match[0].length] ?? "")
-      ) {
-        return { index, length: match[0].length };
-      }
-      index++;
+      continue;
     }
-    return undefined;
-  };
+    const match = /^EXEC(?:UTE)?\b/i.exec(source.slice(index));
+    if (
+      match &&
+      (index === 0 || !/[\w@$#]/.test(source[index - 1])) &&
+      !/[\w@$#]/.test(source[index + match[0].length] ?? "")
+    ) {
+      return { index, length: match[0].length };
+    }
+    index++;
+  }
+  return undefined;
+}
 
+function redactExecArguments(sql: string): string {
   let text = sql;
   let searchFrom = 0;
   while (searchFrom < text.length) {
-    const exec = findExec(searchFrom);
+    const exec = findExec(text, searchFrom);
     if (!exec) {
       break;
     }
