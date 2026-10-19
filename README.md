@@ -322,6 +322,10 @@ Names are trimmed and cut to 255 characters, and anything other than a non-blank
 string is ignored. The method is a no-op outside an active trace and for ignored
 or sampled-out requests.
 
+Observe keeps up to 100 custom names per project in any 30 days. A request
+renamed to a name past that is reported under the route it replaced, and a name
+gives its place up once no request has used it for 30 days.
+
 Everything keyed on the operation ID sees the new name: a drop filter on
 `http.route` (one on `http.url` still matches the URL),
 [`skipSpans`](#skipping-spans-for-expected-outcomes), alerts and SLOs. Rules
