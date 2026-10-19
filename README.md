@@ -65,9 +65,23 @@ $ npm install @nestjs/observe
 
 ## Getting credentials
 
-Sign up at **[observe.nestjs.com](https://observe.nestjs.com)** and create a
-service. The dashboard issues an **app key** and an **app secret**, which the
-agent sends on every ingest request.
+The quickest way is from the project's directory:
+
+```bash
+$ npx @nestjs/observe link
+```
+
+It prints a code, you type it at
+**[observe.nestjs.com/link](https://observe.nestjs.com/link)** (signing up
+first if you have no account) and approve, and it writes the key pair into
+`.env` as `OBSERVE_APP_KEY` and `OBSERVE_APP_SECRET`, git-ignores `.env`, and
+adds `--env-file .env` to the `start` and `start:dev` scripts that run
+`nest start`. `ObserveModule` reads those two variables whenever `appKey` and
+`appSecret` are left out or still hold the `nest new` placeholders.
+
+Or sign up at **[observe.nestjs.com](https://observe.nestjs.com)** and create a
+service by hand. The dashboard issues an **app key** and an **app secret**,
+which the agent sends on every ingest request.
 
 **Free for up to 300,000 events a month**, which covers most individual projects, startups, and small applications.
 
@@ -82,9 +96,9 @@ OBSERVE_APP_SECRET=...
 Without valid credentials the collector answers `401` and telemetry is dropped.
 The agent says so once, then backs off - one flush interval, then two, then
 four, up to one attempt an hour - until the credentials are fixed. They are
-read at startup, so that takes a restart. Leave `appKey` or `appSecret` unset
-and nothing is sent to the hosted collector at all, with a warning at startup
-instead; a collector of your own at `endpoint` still receives batches without
+read at startup, so that takes a restart. Leave `appKey` or `appSecret` unset,
+with nothing in `OBSERVE_APP_KEY` or `OBSERVE_APP_SECRET` either, and nothing
+is sent to the hosted collector at all, with a warning at startup instead; a collector of your own at `endpoint` still receives batches without
 them.
 
 To keep an environment from reporting - local development, say - switch the
