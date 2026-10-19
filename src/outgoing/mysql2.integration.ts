@@ -40,7 +40,7 @@ export function patchMysql2(
       if (typeof sql !== "string") {
         return original.apply(this, args);
       }
-      const { operation, statement } = describeSqlStatement(sql);
+      const { operation, statement } = describeSqlStatement(sql, "mysql");
       const span = recorder.open("mysql2", operation, {
         "db.system": "mysql",
         "db.statement": statement,
