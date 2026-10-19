@@ -79,6 +79,13 @@ adds `--env-file .env` to every script that runs `nest start` (`start`,
 `start:dev` and `start:debug` in a `nest new` project). `ObserveModule` reads those two variables whenever `appKey` and
 `appSecret` are left out or still hold the `nest new` placeholders.
 
+In an app that does not use the SDK yet, the same command also installs
+`@nestjs/observe` with the project's package manager and wires it in -
+`ObserveModule.forRoot()` first in the root module's imports, `ObserveInstrument`
+passed to `NestFactory.create()` - so the app reports from its next start. It
+says so before you approve, and leaves a workspace with several applications
+for you to wire by hand, as the [Quick start](#quick-start) shows.
+
 Or sign up at **[observe.nestjs.com](https://observe.nestjs.com)** and create a
 service by hand. The dashboard issues an **app key** and an **app secret**,
 which the agent sends on every ingest request.

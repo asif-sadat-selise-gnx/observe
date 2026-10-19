@@ -1,15 +1,22 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
 import { hostname } from "node:os";
 import { resolve } from "node:path";
 import { link } from "./link.js";
+import { loadTypeScript } from "./project-setup.js";
+
+const { version } = createRequire(import.meta.url)("../../package.json") as {
+  version: string;
+};
 
 const HOSTED_COLLECTOR_ENDPOINT = "https://observe-api.nestjs.com";
 
 const USAGE = `Usage: npx @nestjs/observe link [--no-browser] [--cwd <dir>]
 
   link    Link this project to NestJS Observe: approve a code in the
-          dashboard, and the API key pair is written into .env.
+          dashboard, and the API key pair is written into .env. In an app
+          that does not use the SDK yet, it is installed and wired in too.
 
 Options:
   --no-browser    Print the link page instead of opening it.
@@ -55,6 +62,7 @@ async function main(argv: string[]): Promise<number> {
         process.env.OBSERVE_ENDPOINT ?? HOSTED_COLLECTOR_ENDPOINT
       ).replace(/\/+$/, ""),
       openBrowser: interactive && !rest.includes("--no-browser"),
+      version,
     },
     {
       fetch,
@@ -63,8 +71,28 @@ async function main(argv: string[]): Promise<number> {
       log: (line) => console.log(line),
       hostname,
       now: Date.now,
+      run,
+      loadTypeScript,
     },
   );
+}
+
+/**
+ * Runs the package manager with the terminal attached. On Windows through the
+ * shell, which is what finds `npm.cmd`; there `^` is cmd.exe's escape
+ * character, so each argument is quoted.
+ */
+function run(command: string, args: string[], cwd: string): Promise<number> {
+  const windows = process.platform === "win32";
+  return new Promise((done) => {
+    const child = spawn(
+      command,
+      windows ? args.map((arg) => `"${arg}"`) : args,
+      { cwd, stdio: "inherit", shell: windows },
+    );
+    child.on("error", () => done(-1));
+    child.on("close", (code) => done(code ?? -1));
+  });
 }
 
 main(process.argv.slice(2)).then(
