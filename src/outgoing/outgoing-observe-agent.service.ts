@@ -30,7 +30,8 @@ import { patchPg } from "./pg.integration.js";
  * if the application already has it.
  */
 /**
- * ORMs that list a driver under `dependencies` rather than `peerDependencies`.
+ * Packages that list a driver under `dependencies` rather than
+ * `peerDependencies`.
  *
  * A peer resolves to the application's own copy, which is the one patched. A
  * direct dependency does too - until the versions disagree, and npm nests a
@@ -38,17 +39,49 @@ import { patchPg } from "./pg.integration.js";
  * so that happens on a single patch release of difference (its `mysql2`
  * 3.24.3 beside an application's 3.24.4); Mongoose asks for a minor range.
  * Queries through the ORM would then run on a copy nobody patched and simply
- * not appear, with nothing to say why. Prisma's SQL Server adapter asks for
- * `mssql` ^12.2, so an application pinned outside that range runs Prisma's
- * queries on a nested copy.
+ * not appear, with nothing to say why. Prisma's driver adapters depend on
+ * their drivers directly too: the pg adapter has since 6.11 and asks for
+ * ^8.16.3, and the SQL Server adapter asks for `mssql` ^12.2, so an
+ * application pinned outside those ranges runs Prisma's queries on a nested
+ * copy.
+ *
+ * The same holds beyond the ORMs, for packages that reach the database on
+ * the application's behalf: query libraries, job queues, session stores,
+ * Keyv's cache stores and Socket.IO's Postgres adapter. pg-promise and
+ * express-mysql-session pin their driver exactly, and @hokify/agenda still
+ * asks for `mongodb` 4. What they run inside a request is recorded whenever
+ * they share the application's copy, so a nested copy is followed too; a
+ * queue's own polling runs outside any trace and records nothing either way.
  *
  * TypeORM, Drizzle, Knex and Sequelize take their driver as a peer and need
  * no entry.
  */
 const DRIVER_DEPENDENTS = {
-  pg: ["@mikro-orm/postgresql"],
-  mysql2: ["@mikro-orm/mysql"],
-  mongodb: ["mongoose", "@mikro-orm/mongodb"],
+  pg: [
+    "@mikro-orm/postgresql",
+    "@prisma/adapter-pg",
+    "pg-promise",
+    "@slonik/pg-driver",
+    "@databases/pg",
+    "pg-boss",
+    "graphile-worker",
+    "connect-pg-simple",
+    "@keyv/postgres",
+    "@socket.io/postgres-adapter",
+  ],
+  mysql2: [
+    "@mikro-orm/mysql",
+    "serverless-mysql",
+    "express-mysql-session",
+    "@keyv/mysql",
+  ],
+  mongodb: [
+    "mongoose",
+    "@mikro-orm/mongodb",
+    "@hokify/agenda",
+    "connect-mongodb-session",
+    "@keyv/mongo",
+  ],
   mssql: ["@prisma/adapter-mssql"],
 } as const;
 
