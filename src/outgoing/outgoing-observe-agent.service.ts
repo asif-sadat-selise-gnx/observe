@@ -14,6 +14,7 @@ import {
 } from "../utils/optional-peer.util.js";
 import { subscribeOutgoingHttp } from "./http.integration.js";
 import { patchMongodb } from "./mongodb.integration.js";
+import { patchMssql } from "./mssql.integration.js";
 import { patchMysql2 } from "./mysql2.integration.js";
 import { OutgoingSpanRecorder } from "./outgoing-span.recorder.js";
 import { patchPg } from "./pg.integration.js";
@@ -22,7 +23,7 @@ import { patchPg } from "./pg.integration.js";
  * Spans for what leaves the process: database queries and outbound HTTP.
  *
  * The drivers are instrumented, not the ORMs. Every ORM a Nest application is
- * likely to use ends in one of three drivers, so three small patches cover
+ * likely to use ends in a supported driver, so small patches cover
  * TypeORM, MikroORM, Prisma's driver adapters, Mongoose, Knex, Drizzle and
  * Sequelize alike, and none of them has to be known by name. Each driver is an
  * optional peer nobody is asked to install: it is looked up, and patched only
@@ -37,15 +38,18 @@ import { patchPg } from "./pg.integration.js";
  * so that happens on a single patch release of difference (its `mysql2`
  * 3.24.3 beside an application's 3.24.4); Mongoose asks for a minor range.
  * Queries through the ORM would then run on a copy nobody patched and simply
- * not appear, with nothing to say why.
+ * not appear, with nothing to say why. Prisma's SQL Server adapter asks for
+ * `mssql` ^12.2, so an application pinned outside that range runs Prisma's
+ * queries on a nested copy.
  *
- * TypeORM, Drizzle, Knex, Sequelize and Prisma's adapters take their driver
- * as a peer and need no entry.
+ * TypeORM, Drizzle, Knex and Sequelize take their driver as a peer and need
+ * no entry.
  */
 const DRIVER_DEPENDENTS = {
   pg: ["@mikro-orm/postgresql"],
   mysql2: ["@mikro-orm/mysql"],
   mongodb: ["mongoose", "@mikro-orm/mongodb"],
+  mssql: ["@prisma/adapter-mssql"],
 } as const;
 
 @Injectable()
@@ -81,6 +85,9 @@ export class OutgoingObserveAgentService implements OnApplicationShutdown {
         "mongodb/lib/cmap/connection",
         DRIVER_DEPENDENTS.mongodb,
         (module) => patchMongodb(module, recorder),
+      );
+      this.patchDriver("mssql", "mssql", DRIVER_DEPENDENTS.mssql, (module) =>
+        patchMssql(module, recorder),
       );
     }
 
