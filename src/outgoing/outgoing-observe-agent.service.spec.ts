@@ -32,7 +32,7 @@ vi.mock("../utils/optional-peer.util.js", async (importOriginal) => {
 describe("OutgoingObserveAgentService", () => {
   it("patches the mssql copy that Prisma's SQL Server adapter resolves", () => {
     const storage = new AsyncLocalStorage<Map<any, any>>();
-    new OutgoingObserveAgentService(
+    const service = new OutgoingObserveAgentService(
       {
         outgoing: { http: false },
         traceIdKey: "traceId",
@@ -40,6 +40,7 @@ describe("OutgoingObserveAgentService", () => {
       new OperationTraceRegistry(storage, false),
       storage,
     );
+    service.onApplicationShutdown();
 
     expect(nested.resolvedBy).toContainEqual([
       "@prisma/adapter-mssql",
