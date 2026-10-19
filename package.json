@@ -155,7 +155,7 @@
     "lint-staged": "17.6.0",
     "mongodb": "7.6.0",
     "mongoose": "9.10.1",
-    "mysql2": "3.24.4",
+    "mysql2": "3.24.6",
     "nestjs-cls": "6.2.1",
     "oxlint": "1.79.0",
     "oxlint-tsgolint": "7.0.2001",
