@@ -1,7 +1,10 @@
 import { errorMonitor, EventEmitter } from "node:events";
 import { OutgoingSpanRecorder } from "./outgoing-span.recorder.js";
 import { patchMethod } from "./patch-method.util.js";
-import { describeSanitizedSqlStatement } from "./sql-statement.util.js";
+import {
+  describeSanitizedSqlStatement,
+  SqlStatementDescription,
+} from "./sql-statement.util.js";
 
 interface MssqlModule {
   Request?: { prototype?: object };
@@ -87,9 +90,35 @@ function describeMssqlStatement(
     const verb = /^[\s(]*([A-Za-z]+)/.exec(text)?.[1]?.toUpperCase();
     return { operation: verb ?? "QUERY" };
   }
-  return describeSanitizedSqlStatement(
-    redactExecArgs ? redactExecArguments(text) : text,
+  return nameProcedureCall(
+    describeSanitizedSqlStatement(
+      redactExecArgs ? redactExecArguments(text) : text,
+    ),
   );
+}
+
+/**
+ * Names a procedure call after its procedure, `EXEC dbo.GetOrders`, with
+ * quotes and brackets dropped as from a table name - the same row whether it
+ * came through `execute()` or an `EXEC` batch, and a row per procedure rather
+ * than one `EXEC` for all of them.
+ */
+function nameProcedureCall(
+  description: SqlStatementDescription,
+): SqlStatementDescription {
+  const exec = /^EXEC(?:UTE)?(?=\s|$)/i.exec(description.statement);
+  if (!exec) {
+    return description;
+  }
+  const name = EXEC_TARGET.exec(
+    description.statement.slice(exec[0].length),
+  )?.[1]
+    .replace(/\s*\.\s*/g, ".")
+    .replace(/["[\]]/g, "");
+  return {
+    ...description,
+    operation: (name ? `EXEC ${name}` : "EXEC").slice(0, 64),
+  };
 }
 
 /**
@@ -102,6 +131,13 @@ function describeMssqlStatement(
  */
 const CAPTURED_STATEMENT =
   /^[\s(]*(?:SELECT|INSERT|UPDATE|DELETE|MERGE|WITH|EXEC|EXECUTE|SET|DECLARE|IF|WHILE|BEGIN|COMMIT|ROLLBACK|SAVE|TRUNCATE|CREATE|ALTER|DROP|USE|PRINT|RAISERROR|WAITFOR|GRANT|REVOKE|DENY|RETURN|OPEN|CLOSE|FETCH|DEALLOCATE|BREAK|CONTINUE|GOTO|KILL|DBCC|BACKUP|RESTORE|CHECKPOINT|RECONFIGURE|BULK|SETUSER|REVERT|SHUTDOWN|READTEXT|WRITETEXT|UPDATETEXT)(?![\p{L}\p{M}\p{N}\p{Pc}@$#])/iu;
+
+/**
+ * What follows `EXEC`: an optional `@status =`, then the procedure's dotted
+ * name, each part bracketed, double-quoted or bare.
+ */
+const EXEC_TARGET =
+  /^\s+(?:@[\p{L}_][\p{L}\p{M}\p{N}\p{Pc}@$#]*\s*=\s*)?((?:\[(?:[^\]]|\]\])*\]|"(?:[^"]|"")*"|[\p{L}_@#][\p{L}\p{M}\p{N}\p{Pc}@$#]*)(?:\s*\.\s*(?:\[(?:[^\]]|\]\])*\]|"(?:[^"]|"")*"|[\p{L}_@#][\p{L}\p{M}\p{N}\p{Pc}@$#]*))*)/u;
 
 function findExec(source: string, start: number) {
   for (let index = start; index < source.length; ) {
@@ -170,14 +206,14 @@ function redactExecArguments(sql: string): string {
     }
 
     const tail = text.slice(exec.index + exec.length, end);
-    const procedure =
-      /^\s+(?:@[A-Za-z_]\w*\s*=\s*)?(?:\[(?:[^\]]|\]\])*\]|"(?:[^"]|"")*"|[A-Za-z_@$#][\w@$#]*)(?:\s*\.\s*(?:\[(?:[^\]]|\]\])*\]|"(?:[^"]|"")*"|[A-Za-z_@$#][\w@$#]*))*/.exec(
-        tail,
+    const procedure = EXEC_TARGET.exec(tail)?.[0] ?? "";
+    // Only what follows the procedure is an argument: `EXEC dbo.Refresh`
+    // has none to replace.
+    if (tail.slice(procedure.length).trim()) {
+      const prefix = text.slice(
+        exec.index,
+        exec.index + exec.length + procedure.length,
       );
-    if (tail.trim()) {
-      const prefix = procedure
-        ? text.slice(exec.index, exec.index + exec.length + procedure[0].length)
-        : text.slice(exec.index, exec.index + exec.length);
       text = `${text.slice(0, exec.index)}${prefix} ?${text.slice(end)}`;
       searchFrom = exec.index + prefix.length + 2;
     } else {
@@ -225,7 +261,7 @@ export function patchMssql(
       );
       const span = recorder.open(
         "mssql",
-        procedure ? (statement ?? operation).slice(0, 64) : operation,
+        operation,
         statement === undefined
           ? { "db.system": "mssql" }
           : { "db.system": "mssql", "db.statement": statement },

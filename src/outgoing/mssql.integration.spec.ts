@@ -287,6 +287,38 @@ describe("patchMssql", () => {
     }
   });
 
+  it.each([
+    ["execute", "dbo.GetOrders"],
+    ["query", "EXEC dbo.GetOrders @id = 1"],
+    ["query", "EXECUTE [dbo].[GetOrders] 1"],
+    ["batch", "exec @rc = dbo . GetOrders PrivateToken123"],
+  ] as const)(
+    "names a procedure the same through %s: %s",
+    async (method, command) => {
+      const h = harness();
+      await h.run(() => new h.Request()[method](command));
+      expect(h.nodes[0].operation).toBe("EXEC dbo.GetOrders");
+      expect(JSON.stringify(h.nodes)).not.toMatch(/Private/);
+    },
+  );
+
+  it.each([
+    ["EXEC dbo.Refresh", "EXEC dbo.Refresh", "EXEC dbo.Refresh"],
+    ["EXEC ('SELECT 1')", "EXEC", "EXEC ?"],
+    [
+      "EXEC dbo.Zamówienia PrivateToken123",
+      "EXEC dbo.Zamówienia",
+      "EXEC dbo.Zamówienia ?",
+    ],
+  ])("names and records %s", async (sql, operation, statement) => {
+    const h = harness();
+    await h.run(() => new h.Request().query(sql));
+    expect(h.nodes[0]).toMatchObject({
+      operation,
+      tags: { "db.statement": statement },
+    });
+  });
+
   it("records an sp_execute of its own like any other procedure", async () => {
     const h = harness();
     await h.run(() => new h.Request().execute("sp_execute"));
