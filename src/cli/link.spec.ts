@@ -75,10 +75,14 @@ describe("npx @nestjs/observe link", () => {
       JSON.stringify(
         {
           name: "orders-api",
+          // What `nest new` generates, plus a script that is not a start.
           scripts: {
+            build: "nest build",
             start: "nest start",
             "start:dev": "nest start --watch",
+            "start:debug": "nest start --debug --watch",
             "start:prod": "node dist/main",
+            lint: "eslint src",
           },
         },
         null,
@@ -105,11 +109,18 @@ describe("npx @nestjs/observe link", () => {
     expect(statSync(join(cwd, ".env")).mode & 0o777).toBe(0o600);
     const pkg = JSON.parse(readFileSync(join(cwd, "package.json"), "utf8"));
     expect(pkg.scripts).toEqual({
+      build: "nest build",
       start: "nest start --env-file .env",
       "start:dev": "nest start --watch --env-file .env",
+      // A debugging session reports too.
+      "start:debug": "nest start --debug --watch --env-file .env",
       // Production loads its environment from the platform, not a file.
       "start:prod": "node dist/main",
+      lint: "eslint src",
     });
+    expect(h.lines).toContain(
+      '  "start", "start:dev" and "start:debug" now load it with --env-file .env.',
+    );
     expect(h.requests[0].body).toEqual({
       applicationName: "orders-api",
       hostname: "kamils-mbp",
@@ -191,5 +202,33 @@ describe("npx @nestjs/observe link", () => {
 
     expect(await run(h)).toBe(1);
     expect(h.requests).toHaveLength(0);
+  });
+
+  it("loads .env in a monorepo's nest start scripts too, and says which start does not", async () => {
+    const pkgPath = join(cwd, "package.json");
+    writeFileSync(
+      pkgPath,
+      JSON.stringify({
+        name: "platform",
+        scripts: {
+          start: "node --env-file=.env.local dist/main",
+          "start:dev": "nodemon",
+          "start:worker": "nest start worker --watch",
+        },
+      }),
+    );
+    const h = harness([{ status: 200, body: LINKED }]);
+
+    expect(await run(h)).toBe(0);
+
+    expect(JSON.parse(readFileSync(pkgPath, "utf8")).scripts).toEqual({
+      // Already loads an env file of its own: left as it is, and not reported.
+      start: "node --env-file=.env.local dist/main",
+      "start:dev": "nodemon",
+      "start:worker": "nest start worker --watch --env-file .env",
+    });
+    expect(h.lines).toContain(
+      '  "start:dev" does not run nest start, so load .env there yourself (node --env-file=.env).',
+    );
   });
 });

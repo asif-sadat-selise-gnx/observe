@@ -107,12 +107,12 @@ export async function link(
   }
   if (scripts.updated.length) {
     deps.log(
-      `  ${scripts.updated.map((name) => `"${name}"`).join(" and ")} now load${scripts.updated.length === 1 ? "s" : ""} it with --env-file .env.`,
+      `  ${listScripts(scripts.updated)} now load${scripts.updated.length === 1 ? "s" : ""} it with --env-file .env.`,
     );
   }
   if (scripts.skipped.length) {
     deps.log(
-      `  ${scripts.skipped.map((name) => `"${name}"`).join(" and ")} do${scripts.skipped.length === 1 ? "es" : ""} not run nest start, so load .env there yourself (node --env-file=.env).`,
+      `  ${listScripts(scripts.skipped)} do${scripts.skipped.length === 1 ? "es" : ""} not run nest start, so load .env there yourself (node --env-file=.env).`,
     );
   }
   deps.log(
@@ -186,6 +186,14 @@ async function post<T>(
     throw new Error(`HTTP ${response.status}`);
   }
   return (await response.json()) as T;
+}
+
+/** `"start"`, `"start" and "start:dev"`, `"start", "start:dev" and "start:debug"`. */
+function listScripts(names: string[]): string {
+  const quoted = names.map((name) => `"${name}"`);
+  return quoted.length > 1
+    ? `${quoted.slice(0, -1).join(", ")} and ${quoted[quoted.length - 1]}`
+    : quoted[0];
 }
 
 function describe(err: unknown): string {

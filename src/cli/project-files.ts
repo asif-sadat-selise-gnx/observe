@@ -5,8 +5,12 @@ import { join } from "node:path";
 export const KEY_VARIABLE = "OBSERVE_APP_KEY";
 export const SECRET_VARIABLE = "OBSERVE_APP_SECRET";
 
-/** The scripts that get `--env-file .env`, when they run `nest start`. */
-const START_SCRIPTS = ["start", "start:dev"] as const;
+/**
+ * Scripts every project is expected to start the app with. When one of them
+ * does not run `nest start`, it is reported, so the caller can say how to
+ * load `.env` instead.
+ */
+const CONVENTIONAL_START_SCRIPTS = new Set(["start", "start:dev"]);
 
 /**
  * Writes the key pair into `<cwd>/.env`, replacing an earlier pair and keeping
@@ -70,15 +74,18 @@ export function ensureEnvIgnored(cwd: string): boolean {
 export interface ScriptsUpdate {
   /** Scripts that now load `.env`. */
   updated: string[];
-  /** Start scripts that exist but do not run `nest start`, left alone. */
+  /** `start` or `start:dev` scripts that do not run `nest start`, left alone. */
   skipped: string[];
 }
 
 /**
- * Adds `--env-file .env` to the `start` and `start:dev` scripts that run
- * `nest start`, so the pair in `.env` reaches the process. Scripts that
- * already pass an env file, or start the app some other way, are left as
- * they are - and reported, so the caller can say how to load the file.
+ * Adds `--env-file .env` to every script that runs `nest start` - `start`,
+ * `start:dev` and `start:debug` in a `nest new` project, and any of a
+ * monorepo's - so the pair in `.env` reaches the process however the app is
+ * started locally. `start:prod` runs `node dist/main` and is left alone: in
+ * production the pair comes from the environment. Scripts that already pass
+ * an env file are left as they are, and a `start` or `start:dev` that starts
+ * the app some other way is reported, so the caller can say how to load it.
  */
 export function addEnvFileToStartScripts(cwd: string): ScriptsUpdate {
   const path = join(cwd, "package.json");
@@ -86,20 +93,16 @@ export function addEnvFileToStartScripts(cwd: string): ScriptsUpdate {
   const pkg = JSON.parse(raw) as { scripts?: Record<string, string> };
   const result: ScriptsUpdate = { updated: [], skipped: [] };
 
-  for (const name of START_SCRIPTS) {
-    const script = pkg.scripts?.[name];
-    if (script === undefined) {
+  for (const [name, script] of Object.entries(pkg.scripts ?? {})) {
+    if (typeof script !== "string" || /--env-file\b/.test(script)) {
       continue;
     }
-    if (/--env-file\b/.test(script)) {
-      continue;
-    }
-    if (!/^\s*nest start\b/.test(script)) {
+    if (/^\s*nest start\b/.test(script)) {
+      pkg.scripts![name] = `${script.trimEnd()} --env-file .env`;
+      result.updated.push(name);
+    } else if (CONVENTIONAL_START_SCRIPTS.has(name)) {
       result.skipped.push(name);
-      continue;
     }
-    pkg.scripts![name] = `${script.trimEnd()} --env-file .env`;
-    result.updated.push(name);
   }
 
   if (result.updated.length) {

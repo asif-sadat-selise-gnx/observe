@@ -75,8 +75,8 @@ It prints a code, you type it at
 **[observe.nestjs.com/link](https://observe.nestjs.com/link)** (signing up
 first if you have no account) and approve, and it writes the key pair into
 `.env` as `OBSERVE_APP_KEY` and `OBSERVE_APP_SECRET`, git-ignores `.env`, and
-adds `--env-file .env` to the `start` and `start:dev` scripts that run
-`nest start`. `ObserveModule` reads those two variables whenever `appKey` and
+adds `--env-file .env` to every script that runs `nest start` (`start`,
+`start:dev` and `start:debug` in a `nest new` project). `ObserveModule` reads those two variables whenever `appKey` and
 `appSecret` are left out or still hold the `nest new` placeholders.
 
 Or sign up at **[observe.nestjs.com](https://observe.nestjs.com)** and create a
