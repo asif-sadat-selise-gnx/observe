@@ -73,7 +73,13 @@ function describeMssqlStatement(
     }
   }
   if (truncated) {
-    text = text.replace(/[\p{L}\p{M}\p{N}_$@#]+$/u, "?");
+    // Anchored at the run's start. Unanchored, the engine tried every position
+    // inside each run of word characters and backtracked the run each time:
+    // quadratic, 0.1 s of a blocked event loop for one 8 KB name.
+    text = text.replace(
+      /(^|[^\p{L}\p{M}\p{N}_$@#])[\p{L}\p{M}\p{N}_$@#]+$/u,
+      "$1?",
+    );
   }
   // `;WITH` is how T-SQL is often written, to end whatever came before.
   text = text.replace(/^[\s;]+/, "");

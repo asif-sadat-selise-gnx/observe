@@ -726,6 +726,22 @@ describe("MSSQL statement sanitization", () => {
     expect(h.nodes[1].tags).not.toHaveProperty("db.statement");
   });
 
+  it("bounds a statement cut off after a long name in linear time", async () => {
+    const h = harness();
+    const sql = `SELECT ${"a".repeat(8180)} , private_column FROM t WHERE id = 1`;
+    const timings: number[] = [];
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const startedAt = performance.now();
+      await h.run(() => new h.Request().query(sql));
+      timings.push(performance.now() - startedAt);
+    }
+    // Quadratic, this took a tenth of a second on a fast machine.
+    expect(Math.min(...timings)).toBeLessThan(50);
+    expect(h.nodes[0].tags?.["db.statement"]).toBe(
+      `SELECT ${"a".repeat(2041)}`,
+    );
+  });
+
   it("redacts a numeric token cut off at the input boundary", async () => {
     const h = harness();
     await h.run(() =>
