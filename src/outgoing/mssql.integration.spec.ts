@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { errorMonitor } from "node:events";
+import { createRequire } from "node:module";
 import mssql from "mssql";
 import { ObserveModuleOptionsWithDefaults } from "../interfaces/index.js";
 import { OngoingTraceEventNode } from "../interfaces/trace-events.interfaces.js";
@@ -234,6 +235,62 @@ describe("patchMssql", () => {
     });
     await h.run(() => new h.Request().execute(`dbo.${"p".repeat(100)}`));
     expect(h.nodes[1].operation).toHaveLength(64);
+  });
+
+  it("records a prepared statement as the statement it executes, not its sp_ procedures", async () => {
+    const h = harness();
+    // The driver builds a prepared statement's requests from its internal
+    // `driver.Request`, which the public module does not re-export.
+    const { driver } = createRequire(import.meta.url)("mssql/lib/shared") as {
+      driver: { Request: unknown };
+    };
+    const DriverRequest = driver.Request;
+    driver.Request = h.Request;
+    try {
+      const pool = {
+        connected: true,
+        config: { options: {} },
+        acquire: (_requester: unknown, callback: Callback) =>
+          setImmediate(callback, null, {}, {}),
+        release: () => {},
+      };
+      const ps = new mssql.PreparedStatement(pool as never);
+      ps.input("id", mssql.Int);
+      await h.run(async () => {
+        await ps.prepare(
+          "SELECT * FROM [dbo].[orders] WHERE id = @id AND note = N'private-value'",
+        );
+        await ps.execute({ id: 123456 });
+        await ps.unprepare();
+      });
+      expect(h.calls.map((call) => call.command)).toEqual([
+        "sp_prepare",
+        "sp_execute",
+        "sp_unprepare",
+      ]);
+      expect(h.calls[1].inputs.id.value).toBe(123456);
+      expect(h.nodes).toMatchObject([
+        {
+          className: "mssql",
+          operation: "SELECT dbo.orders",
+          tags: {
+            "db.system": "mssql",
+            "db.statement":
+              "SELECT * FROM [dbo].[orders] WHERE id = @id AND note = ?",
+          },
+          ends: [undefined],
+        },
+      ]);
+      expect(JSON.stringify(h.nodes)).not.toMatch(/private|123456/);
+    } finally {
+      driver.Request = DriverRequest;
+    }
+  });
+
+  it("records an sp_execute of its own like any other procedure", async () => {
+    const h = harness();
+    await h.run(() => new h.Request().execute("sp_execute"));
+    expect(h.nodes[0].operation).toBe("EXEC sp_execute");
   });
 
   it.each(["query", "batch", "execute"] as const)(

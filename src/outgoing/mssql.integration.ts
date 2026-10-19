@@ -10,8 +10,21 @@ interface MssqlModule {
 interface MssqlRequest extends EventEmitter {
   parent?: {
     config?: { options?: { enableQuotedIdentifier?: boolean | null } };
+    /** Set when the parent is a `PreparedStatement`: what it was prepared with. */
+    statement?: unknown;
+    unprepare?: unknown;
   };
 }
+
+/**
+ * The procedures a `PreparedStatement` calls on requests of its own: the
+ * driver parents those requests to the statement and executes these by name.
+ */
+const PREPARED_STATEMENT_PROCEDURES = new Set([
+  "sp_prepare",
+  "sp_execute",
+  "sp_unprepare",
+]);
 
 function describeMssqlStatement(
   sql: string,
@@ -178,16 +191,31 @@ export function patchMssql(
       if (typeof command !== "string" || typeof callback !== "function") {
         return original.apply(this, args);
       }
+      let sql = command;
+      let procedure = method === "_execute";
+      if (
+        procedure &&
+        typeof this.parent?.unprepare === "function" &&
+        PREPARED_STATEMENT_PROCEDURES.has(command)
+      ) {
+        // Preparing and unpreparing are the statement's bookkeeping, and
+        // `sp_execute` would name every prepared statement alike: the span is
+        // the statement it executes, described like any other query.
+        const prepared = this.parent.statement;
+        if (command !== "sp_execute" || typeof prepared !== "string") {
+          return original.apply(this, args);
+        }
+        sql = prepared;
+        procedure = false;
+      }
       const { operation, statement } = describeMssqlStatement(
-        method === "_execute" ? `EXEC ${command}` : command,
+        procedure ? `EXEC ${sql}` : sql,
         this.parent?.config?.options?.enableQuotedIdentifier !== false,
-        method !== "_execute",
+        !procedure,
       );
       const span = recorder.open(
         "mssql",
-        method === "_execute"
-          ? (statement ?? operation).slice(0, 64)
-          : operation,
+        procedure ? (statement ?? operation).slice(0, 64) : operation,
         statement === undefined
           ? { "db.system": "mssql" }
           : { "db.system": "mssql", "db.statement": statement },
