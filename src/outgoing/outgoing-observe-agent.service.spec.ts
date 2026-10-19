@@ -66,6 +66,13 @@ const nested = vi.hoisted(() => {
     resolvedBy: [] as Array<[string, string]>,
     /** The `pg` copy npm nests inside Prisma's pg adapter on a version clash. */
     pg: pg(),
+    /** The `mssql` copy npm nests inside Prisma's SQL Server adapter. */
+    mssql: {
+      Request: class {
+        _query() {}
+        _execute() {}
+      },
+    },
     /** Packages beyond the ORMs, each with a driver copy of its own. */
     beyondOrms: drivers.flatMap(({ dependents, copy, ...driver }) =>
       dependents.map((dependent) => ({
@@ -84,6 +91,7 @@ vi.mock("../utils/optional-peer.util.js", async (importOriginal) => {
     await importOriginal<typeof import("../utils/optional-peer.util.js")>();
   const copies = new Map<string, unknown>([
     ["@prisma/adapter-pg", nested.pg],
+    ["@prisma/adapter-mssql", nested.mssql],
     ...nested.beyondOrms.map(
       ({ dependent, copy }) => [dependent, copy] as [string, unknown],
     ),
@@ -119,6 +127,16 @@ describe("OutgoingObserveAgentService", () => {
     expect(nested.resolvedBy).toContainEqual(["@prisma/adapter-pg", "pg"]);
     for (const { prototype } of [nested.pg.Client, nested.pg.Pool]) {
       expect(isPatched(prototype, "query")).toBe(true);
+    }
+  });
+
+  it("patches the mssql copy that Prisma's SQL Server adapter resolves", () => {
+    expect(nested.resolvedBy).toContainEqual([
+      "@prisma/adapter-mssql",
+      "mssql",
+    ]);
+    for (const method of ["_query", "_execute"]) {
+      expect(isPatched(nested.mssql.Request.prototype, method)).toBe(true);
     }
   });
 
