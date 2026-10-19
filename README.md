@@ -107,8 +107,6 @@ agent off rather than supplying fake credentials, which are sent and refused:
 ```ts
 ObserveModule.forRoot({
   enabled: process.env.NODE_ENV === "production",
-  appKey: process.env.OBSERVE_APP_KEY ?? "",
-  appSecret: process.env.OBSERVE_APP_SECRET ?? "",
   serviceId: "my-service",
 });
 ```
@@ -136,11 +134,8 @@ import { ObserveModule } from "./observe";
 
 @Module({
   imports: [
-    ObserveModule.forRoot({
-      appKey: process.env.OBSERVE_APP_KEY!,
-      appSecret: process.env.OBSERVE_APP_SECRET!,
-      serviceId: "my-service",
-    }),
+    // appKey and appSecret default to OBSERVE_APP_KEY and OBSERVE_APP_SECRET.
+    ObserveModule.forRoot({ serviceId: "my-service" }),
   ],
 })
 export class AppModule {}

@@ -168,27 +168,32 @@ export interface ObserveOptions {
   /**
    * Application key identifying this service to the collector.
    *
-   * Sign up at https://observe.nestjs.com and create a service; the dashboard
-   * issues the key and secret together.
+   * `npx @nestjs/observe link` issues the key and secret together and writes
+   * them into `.env`; so does the dashboard at https://observe.nestjs.com.
+   * Left out - or still holding the `nest new` placeholder - it is read from
+   * `OBSERVE_APP_KEY` when the options resolve.
    *
    * Sent as `x-api-key` on every ingest request, alongside `appSecret`.
    * Without valid credentials the collector answers 401 and the batch is
    * dropped; the agent then backs off, to one attempt an hour, until a
-   * restart picks up fixed credentials. With this or `appSecret` unset,
-   * nothing is sent to the hosted collector at all - a warning at startup
-   * says so - while a collector of your own still receives the batches.
+   * restart picks up fixed credentials. With this or `appSecret` unset, and
+   * nothing in the environment either, nothing is sent to the hosted
+   * collector at all - a warning at startup says so - while a collector of
+   * your own still receives the batches.
    */
-  appKey: string;
+  appKey?: string;
 
   /**
-   * Secret paired with `appKey`, issued with it at https://observe.nestjs.com.
+   * Secret paired with `appKey`, issued with it. Left out - or still holding
+   * the `nest new` placeholder - it is read from `OBSERVE_APP_SECRET` when the
+   * options resolve.
    *
    * Sent as `x-api-secret`. Shown once when the key is issued and not
    * retrievable afterwards, so treat it as you would a password: supply it from
    * the environment rather than committing it alongside the rest of this config.
    * If it is lost, issue a new pair from the dashboard.
    */
-  appSecret: string;
+  appSecret?: string;
 
   /**
    * Base URL of the collector, without a trailing path.
