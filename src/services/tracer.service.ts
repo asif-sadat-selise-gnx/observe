@@ -136,6 +136,11 @@ export class TracerService<
       // in this case anyway, so the outcome is unchanged.
       return;
     }
+    if (this.options.enabled === false) {
+      // A disabled agent opens no traces, and the registry warns about every
+      // error it is handed without one.
+      return;
+    }
     const callerId = store.get(CALLER_METADATA_KEY) as string | undefined;
     this.operationTraceRegistry.captureError(
       traceId,

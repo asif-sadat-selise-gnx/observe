@@ -87,6 +87,22 @@ and nothing is sent to the hosted collector at all, with a warning at startup
 instead; a collector of your own at `endpoint` still receives batches without
 them.
 
+To keep an environment from reporting - local development, say - switch the
+agent off rather than supplying fake credentials, which are sent and refused:
+
+```ts
+ObserveModule.forRoot({
+  enabled: process.env.NODE_ENV === "production",
+  appKey: process.env.OBSERVE_APP_KEY ?? "",
+  appSecret: process.env.OBSERVE_APP_SECRET ?? "",
+  serviceId: "my-service",
+});
+```
+
+With `enabled: false` the module stays imported - `TracerService` still
+resolves, and calling it is harmless - but nothing is recorded or sent, and the
+only trace of it is one line at startup.
+
 ## Quick start
 
 `createObserveModule()` returns both the dynamic module and the instrumentation
@@ -326,6 +342,7 @@ Every option, with its default. The [documentation](https://www.observe.nestjs.c
 
 | Option                   | Default                             | What it does                                                                                                                                                                                      |
 | ------------------------ | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`                | `true`                              | `false` records and sends nothing, and needs no credentials - see [Getting credentials](#getting-credentials).                                                                                    |
 | `appKey`, `appSecret`    | required                            | The credentials the dashboard issues - see [Getting credentials](#getting-credentials).                                                                                                           |
 | `serviceId`              | required                            | Names the service in the dashboard, in at most 100 characters - a longer one is cut to fit, with a warning at startup.                                                                           |
 | `serviceVersion`         | inferred                            | The release the process runs, at most 50 characters - see [What it records without any code](#what-it-records-without-any-code). `false` reports none.                                          |

@@ -434,6 +434,16 @@ describe("StdoutForwarderService", () => {
       }
     });
 
+    it("leaves stdout alone when the agent is disabled", () => {
+      const original = process.stdout.write;
+      const service = build({ enabled: false, forwardLogs: true });
+      try {
+        expect(process.stdout.write).toBe(original);
+      } finally {
+        service.onModuleDestroy();
+      }
+    });
+
     it("forwards writes and leaves stdout working", () => {
       const service = build();
       const original = process.stdout.write;

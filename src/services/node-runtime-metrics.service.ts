@@ -94,7 +94,7 @@ export class NodeRuntimeMetricsService
   }
 
   onModuleInit() {
-    if (!this.options.runtimeMetrics) {
+    if (!this.options.runtimeMetrics || this.options.enabled === false) {
       return;
     }
 

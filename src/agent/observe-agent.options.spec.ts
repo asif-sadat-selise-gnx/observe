@@ -360,4 +360,79 @@ describe("ObserveAgentWorker options", () => {
       expect(warn).not.toHaveBeenCalled();
     });
   });
+
+  // `enabled: false` is how an application keeps the module imported in an
+  // environment that should not report - local development, most often -
+  // without fake credentials, which would be sent and refused.
+  describe("disabled", () => {
+    const spyLogger = () => {
+      const logger = (
+        worker as unknown as {
+          logger: {
+            log: (m: string) => void;
+            warn: (m: string) => void;
+            error: (m: string) => void;
+          };
+        }
+      ).logger;
+      return {
+        log: vi.spyOn(logger, "log").mockImplementation(() => undefined),
+        warn: vi.spyOn(logger, "warn").mockImplementation(() => undefined),
+        error: vi.spyOn(logger, "error").mockImplementation(() => undefined),
+      };
+    };
+
+    it("starts no worker and says so once, even with credentials", () => {
+      build({ enabled: false, runtimeMetrics: true });
+      const { log, warn, error } = spyLogger();
+      worker.onModuleInit();
+
+      expect(worker.initializeWorker).not.toHaveBeenCalled();
+      expect(log).toHaveBeenCalledTimes(1);
+      expect(log).toHaveBeenCalledWith(
+        expect.stringContaining("enabled: false"),
+      );
+      expect(warn).not.toHaveBeenCalled();
+      expect(error).not.toHaveBeenCalled();
+      expect(runtimeMetricsStarted()).toBe(false);
+    });
+
+    it("does not warn about credentials it does not need", () => {
+      build({
+        enabled: false,
+        appKey: undefined,
+        appSecret: undefined,
+        endpoint: "https://observe-api.nestjs.com",
+      });
+      const { warn } = spyLogger();
+      worker.onModuleInit();
+
+      expect(worker.initializeWorker).not.toHaveBeenCalled();
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it("sends nothing to a collector of the user's own either", () => {
+      build({ enabled: false, endpoint: "http://127.0.0.1:4000" });
+      spyLogger();
+      worker.onModuleInit();
+
+      expect(worker.initializeWorker).not.toHaveBeenCalled();
+    });
+
+    it("empties the buffer on flush without handing anything off", () => {
+      build({ enabled: false }).flush();
+
+      expect(sharedBuffer.resetMainThreadBuffer).toHaveBeenCalled();
+      expect(sharedBuffer.encodeAndWrite).not.toHaveBeenCalled();
+    });
+
+    it("runs as before when switched on explicitly", () => {
+      build({ enabled: true });
+      const { log } = spyLogger();
+      worker.onModuleInit();
+
+      expect(worker.initializeWorker).toHaveBeenCalled();
+      expect(log).not.toHaveBeenCalled();
+    });
+  });
 });

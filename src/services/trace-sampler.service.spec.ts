@@ -1,9 +1,10 @@
 import { ObserveModuleOptionsWithDefaults } from "../interfaces/observe-options.interface.js";
 import { TraceSamplerService } from "./trace-sampler.service.js";
 
-const sampler = (tracesSampleRate?: unknown) =>
+const sampler = (tracesSampleRate?: unknown, enabled?: boolean) =>
   new TraceSamplerService({
     tracesSampleRate,
+    enabled,
   } as ObserveModuleOptionsWithDefaults);
 
 describe("TraceSamplerService", () => {
@@ -94,6 +95,26 @@ describe("TraceSamplerService", () => {
       expect(
         service.shouldCapture("http", { url: "/health", method: "GET" }),
       ).toBe(false);
+    });
+  });
+
+  describe("when the agent is disabled", () => {
+    // Every protocol but jobs learns here that it should open no trace.
+    it.each([
+      ["no sample rate", undefined],
+      ["a rate of 1", 1],
+      ["a callback that keeps everything", () => true],
+    ])("captures nothing, given %s", (_, rate) => {
+      expect(sampler(rate, false).shouldCapture("http", httpAttributes)).toBe(
+        false,
+      );
+    });
+
+    it("does not consult the callback", () => {
+      const decide = vi.fn().mockReturnValue(true);
+      sampler(decide, false).shouldCapture("http", httpAttributes);
+
+      expect(decide).not.toHaveBeenCalled();
     });
   });
 });

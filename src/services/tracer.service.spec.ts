@@ -231,6 +231,27 @@ describe("TracerService", () => {
       expect(root.tags).toMatchObject({ orderId: "o-2" });
     });
 
+    it("hands nothing to the registry when the agent is disabled", async () => {
+      // A disabled agent opens no trace for the request, and the registry
+      // warns about every error it is given without one.
+      const disabled = new TracerService(
+        registry,
+        als as never,
+        {} as ObserveAgentSharedBuffer,
+        {
+          traceIdKey: TRACE_ID_KEY,
+          enabled: false,
+        } as ObserveModuleOptionsWithDefaults,
+      );
+      const captureError = vi.spyOn(registry, "captureError");
+
+      await als.run(new Map([[TRACE_ID_KEY, "untraced"]]), () =>
+        disabled.captureError(new Error("x")),
+      );
+
+      expect(captureError).not.toHaveBeenCalled();
+    });
+
     it("fails clearly outside any async context", async () => {
       await expect(tracer.captureError(new Error("x"))).rejects.toThrow(
         /AsyncLocalStorage is not initialized/,

@@ -273,6 +273,16 @@ describe("NodeRuntimeMetricsService", () => {
     });
   });
 
+  describe("agent disabled", () => {
+    it("starts no monitor, whatever runtimeMetrics says", () => {
+      service = build({ enabled: false, runtimeMetrics: true });
+
+      service.onModuleInit();
+
+      expect(() => service.collectNodeRuntimeMetrics()).toThrow();
+    });
+  });
+
   describe("defaults", () => {
     it("collects unless told otherwise", () => {
       service = build();
