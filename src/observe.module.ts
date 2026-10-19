@@ -85,6 +85,51 @@ function withServiceId<Options extends Pick<ObserveOptions, "serviceId">>(
   return { ...options, serviceId: sent };
 }
 
+/** The credentials `nest new` writes before an account exists. */
+const SCAFFOLD_CREDENTIALS = {
+  appKey: "YOUR_APP_KEY",
+  appSecret: "YOUR_APP_SECRET",
+} as const;
+
+/**
+ * `appKey` and `appSecret` from `OBSERVE_APP_KEY` and `OBSERVE_APP_SECRET`
+ * when the options leave them out - or still hold the `nest new`
+ * placeholders, which is what a project linked with
+ * `npx @nestjs/observe link` keeps in its AppModule while the real pair sits
+ * in its `.env`. A value the application passes explicitly always wins.
+ *
+ * Read when the options resolve, which for `forRoot()` is when AppModule is
+ * imported: early enough for `node --env-file` and `nest start --env-file`,
+ * which load the file before any module runs.
+ */
+function credentialFromEnv(
+  value: string | undefined,
+  placeholder: string,
+  variable: string,
+): string | undefined {
+  return (!value || value === placeholder) && process.env[variable]
+    ? process.env[variable]
+    : value;
+}
+
+function withCredentialsFromEnv<
+  Options extends Pick<ObserveOptions, "appKey" | "appSecret">,
+>(options: Options): Options {
+  return {
+    ...options,
+    appKey: credentialFromEnv(
+      options.appKey,
+      SCAFFOLD_CREDENTIALS.appKey,
+      "OBSERVE_APP_KEY",
+    ),
+    appSecret: credentialFromEnv(
+      options.appSecret,
+      SCAFFOLD_CREDENTIALS.appSecret,
+      "OBSERVE_APP_SECRET",
+    ),
+  };
+}
+
 /**
  * Names the release when the application did not, so Releases, regressions
  * and fix verification work without anyone threading a version through the
@@ -223,10 +268,12 @@ export function createObserveModule<Store extends Record<string, unknown>>(
           {
             provide: OBSERVE_OPTIONS,
             useValue: withServiceVersion(
-              withServiceId({
-                ...options,
-                ...observeOpts,
-              }),
+              withServiceId(
+                withCredentialsFromEnv({
+                  ...options,
+                  ...observeOpts,
+                }),
+              ),
             ),
           },
         ],
@@ -274,10 +321,12 @@ export function createObserveModule<Store extends Record<string, unknown>>(
           useFactory: async (...args: any[]) => {
             const opts = await useFactory(...args);
             return withServiceVersion(
-              withServiceId({
-                ...options,
-                ...opts,
-              }),
+              withServiceId(
+                withCredentialsFromEnv({
+                  ...options,
+                  ...opts,
+                }),
+              ),
             );
           },
           inject: asyncOptions.inject || [],
@@ -292,10 +341,12 @@ export function createObserveModule<Store extends Record<string, unknown>>(
         provide: OBSERVE_OPTIONS,
         useFactory: async (optionsFactory: ObserveOptionsFactory) =>
           withServiceVersion(
-            withServiceId({
-              ...options,
-              ...(await optionsFactory.createObserveOptions()),
-            }),
+            withServiceId(
+              withCredentialsFromEnv({
+                ...options,
+                ...(await optionsFactory.createObserveOptions()),
+              }),
+            ),
           ),
         inject: [optionsFactoryToken],
       };
