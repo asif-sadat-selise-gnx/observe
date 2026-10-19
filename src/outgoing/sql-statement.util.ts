@@ -124,7 +124,14 @@ export function describeSqlStatement(
       "$1?",
     );
   }
-  const statement = sanitized
+  return describeSanitizedSqlStatement(sanitized);
+}
+
+/** Names and bounds SQL whose literals and comments have already been removed. */
+export function describeSanitizedSqlStatement(
+  sql: string,
+): SqlStatementDescription {
+  const statement = sql
     .replace(/\(\s*\?(?:\s*,\s*\?)+\s*\)/g, "(?)")
     .replace(/\(\s*\$\d+(?:\s*,\s*\$\d+)+\s*\)/g, "($n)")
     .replace(/\s+/g, " ")
