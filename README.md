@@ -303,6 +303,52 @@ ObserveModule.forRoot({
 
 A failed request is always captured (headers only, unless `body` is on); `capture: false` turns the feature off. Everything captured goes through the same redaction as error messages and logs before it leaves the process - sensitive keys by name, secrets by pattern - so naming `authorization` in `headers` records `[REDACTED]`.
 
+## Custom request operation IDs
+
+HTTP requests are grouped by their route path by default. If you want to report
+a different operation name for a request, inject `TracerService` and call
+`setOperationId()` while the request is in flight - from the handler, or from a
+guard, interceptor or middleware:
+
+```ts
+import { TracerService } from "@nestjs/observe";
+
+// Inject TracerService in your controller's constructor:
+constructor(private readonly tracerService: TracerService) {}
+
+// Choose any naming scheme that suits your application. `body.method` comes
+// from the client, so name only the methods you serve:
+const RPC_METHODS = new Set(["orders.list", "orders.create", "customers.get"]);
+
+this.tracerService.setOperationId(
+  RPC_METHODS.has(body.method) ? `/rpc/${body.method}` : "/rpc/unknown",
+);
+```
+
+For example, an RPC handler could distinguish `orders.list` from `orders.create`,
+even when both requests use the same route. This changes only the operation ID,
+not the URL, HTTP method, tags, or spans. The name replaces the route or GraphQL
+name; a later call replaces an earlier one.
+
+The operation ID is an application-defined name; choose any scheme that fits
+your use case. Use stable, bounded names rather than per-request values such as
+user IDs or request IDs to avoid high-cardinality groups, and don't pass a
+client-supplied value through unchecked: that lets any caller create new groups.
+Names are trimmed and cut to 255 characters, and anything other than a non-blank
+string is ignored. The method is a no-op outside an active trace and for ignored
+or sampled-out requests.
+
+Observe keeps up to 100 custom names per project in any 30 days. A request
+renamed to a name past that is reported under the route it replaced, and a name
+gives its place up once no request has used it for 30 days.
+
+Everything keyed on the operation ID sees the new name: a drop filter on
+`http.route` (one on `http.url` still matches the URL),
+[`skipSpans`](#skipping-spans-for-expected-outcomes), alerts and SLOs. Rules
+and history recorded under the old name don't carry over to the new one.
+`@Objective()` is not declared for renamed requests: an SLO watches one route,
+and each name is a route of its own.
+
 ## Declaring objectives in code
 
 `@Objective()` states what a route promises, next to the handler that has to keep it, and Observe turns each promise into an [SLO](https://www.observe.nestjs.com/documentation/slos). The objective is written, reviewed and versioned with the route it covers:

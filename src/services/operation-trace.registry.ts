@@ -12,6 +12,7 @@ import {
 import { TraceSpanDelegate } from "../trace-span.delegate.js";
 import { KeyOf } from "../types/key-of.type.js";
 import { CodeFrame, collectCodeFrames } from "../utils/source-context.util.js";
+import { fallbackOperationId } from "../utils/fallback-operation-id.util.js";
 import { LogRedactor } from "../utils/log-redactor.js";
 import { CALLER_METADATA_KEY } from "../observe.constants.js";
 import {
@@ -42,6 +43,14 @@ type SnapshotWithSignal = (RequestSnapshot | JobSnapshot) & {
    * kind.
    */
   errorStatusCode?: number;
+  /**
+   * The name `TracerService.setOperationId` gave the operation, put in place
+   * on hand-off. Held apart until then so that the transport's own naming -
+   * the route hook, which fires after middleware, and the GraphQL root field -
+   * cannot overwrite it, and so the name it replaces is still known when it
+   * is applied.
+   */
+  customOperationId?: string;
 };
 
 /**
@@ -586,6 +595,40 @@ export class OperationTraceRegistry {
     snapshot.operationId = path;
   }
 
+  setOperationId(traceId: TraceId, operationId: string): void {
+    const snapshot = this.traceSnapshots.get(traceId);
+    if (snapshot && "protocol" in snapshot) {
+      snapshot.customOperationId = operationId;
+    }
+  }
+
+  /**
+   * Puts the name `setOperationId` chose in place of the transport's, and
+   * keeps the one it replaces beside it as `defaultOperationId`. That one
+   * tells the collector what the request would otherwise be grouped under,
+   * and tells `@Objective` that the request was renamed.
+   *
+   * Renaming a request to the name it already had changes nothing, so it is
+   * not recorded as a rename.
+   */
+  private applyCustomOperationId(
+    snapshot: RequestSnapshot,
+    operationId: string,
+  ): void {
+    // The same fallback the buffer applies to a request no route matched, so
+    // the name kept is the one the request would have been reported under.
+    const defaultOperationId =
+      snapshot.operationId ??
+      fallbackOperationId(snapshot.attributes?.originalUrl);
+    if (operationId === defaultOperationId) {
+      return;
+    }
+    snapshot.operationId = operationId;
+    if (defaultOperationId !== undefined) {
+      snapshot.attributes = { ...snapshot.attributes, defaultOperationId };
+    }
+  }
+
   /**
    * Labels a trace with the GraphQL root field being resolved.
    *
@@ -728,12 +771,20 @@ export class OperationTraceRegistry {
       }
       cleanup();
 
-      // These three are what distinguish the registry's working copy from the
+      // These four are what distinguish the registry's working copy from the
       // snapshot the API receives, so removing them is the hand-off.
       const bookkeeping = snapshot as Partial<SnapshotWithSignal>;
+      const customOperationId = bookkeeping.customOperationId;
       delete bookkeeping.refsCounter;
       delete bookkeeping.refsMarkedAsComplete;
       delete bookkeeping.errorStatusCode;
+      delete bookkeeping.customOperationId;
+
+      // Before `skipSpans`, which judges the operation by the name it is
+      // reported under.
+      if (customOperationId !== undefined && "protocol" in snapshot) {
+        this.applyCustomOperationId(snapshot, customOperationId);
+      }
 
       // Emptied rather than removed: the collector requires the field, and an
       // empty tree is what it already stores for a trace it sampled out - the
