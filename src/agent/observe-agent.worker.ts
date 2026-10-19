@@ -93,6 +93,7 @@ const SCAFFOLD_APP_SECRET = "YOUR_APP_SECRET";
 
 const DEMO_URL = "https://www.observe-demo.nestjs.com/dashboard";
 const SIGN_UP_URL = "https://observe.nestjs.com";
+const DASHBOARD_URL = `${SIGN_UP_URL}/dashboard`;
 
 @Injectable()
 export class ObserveAgentWorker implements OnModuleInit, OnApplicationShutdown {
@@ -690,6 +691,7 @@ export class ObserveAgentWorker implements OnModuleInit, OnApplicationShutdown {
 
     const mode = parseDegradedMessage(msg);
     if (mode !== null) {
+      this.reportFirstAcceptedBatch();
       this.applyIngestMode(mode, parseOveragePauseReason(msg));
       return;
     }
@@ -702,6 +704,31 @@ export class ObserveAgentWorker implements OnModuleInit, OnApplicationShutdown {
     if (this.options.debug) {
       this.logger.debug(msg);
     }
+  }
+
+  /** Whether this process has said the collector accepted its first batch. */
+  private reportedConnection = false;
+
+  /**
+   * Says once, at the default level, that a batch got through.
+   *
+   * Without it a working setup and a silent one look the same: the startup
+   * line fires before anything is sent, and success is otherwise logged only
+   * under `debug`. Keyed off the degraded verdict because the worker posts it
+   * on every 200 and on nothing else. The first batch is usually runtime
+   * metrics alone, sent before the app has served anything - so the line says
+   * requests and jobs follow traffic, which a laptop run may never have.
+   */
+  private reportFirstAcceptedBatch() {
+    if (this.reportedConnection) {
+      return;
+    }
+    this.reportedConnection = true;
+    this.logger.log(
+      this.isHostedCollector
+        ? `Observe is connected: the collector accepted this app's first batch. Requests and jobs appear at ${DASHBOARD_URL} as soon as the app serves them.`
+        : `Observe is connected: ${this.endpoint} accepted this app's first batch.`,
+    );
   }
 
   /**
