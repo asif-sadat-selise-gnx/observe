@@ -23,7 +23,7 @@ export interface WireSnapshot {
   ti: string;
   op?: string;
   p?: string;
-  a?: { m?: string; sc?: number; ou?: string };
+  a?: { m?: string; sc?: number; ou?: string; dop?: string };
   t?: WireSpan[];
   [key: string]: unknown;
 }

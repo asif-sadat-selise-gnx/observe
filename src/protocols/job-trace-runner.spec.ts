@@ -19,10 +19,17 @@ describe("JobTraceRunner: jobs.ignore", () => {
   let insertJobSnapshot: ReturnType<typeof vi.fn>;
   let warn: ReturnType<typeof vi.fn>;
 
-  const createRunner = (jobs: ObserveModuleOptionsWithDefaults["jobs"]) =>
+  const createRunner = (
+    jobs: ObserveModuleOptionsWithDefaults["jobs"],
+    enabled?: boolean,
+  ) =>
     new JobTraceRunner(
       { insertJobSnapshot } as unknown as ObserveAgentSharedBuffer,
-      { traceIdKey: TRACE_ID_KEY, jobs } as ObserveModuleOptionsWithDefaults,
+      {
+        traceIdKey: TRACE_ID_KEY,
+        jobs,
+        enabled,
+      } as ObserveModuleOptionsWithDefaults,
       registry,
       als as never,
       { warn, debug: vi.fn() } as unknown as Logger,
@@ -107,6 +114,19 @@ describe("JobTraceRunner: jobs.ignore", () => {
 
     expect(seen.traced).toBe(true);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("bad predicate"));
+  });
+
+  it("opens no trace for any job when the agent is disabled", async () => {
+    // No `ignore` at all: `enabled: false` alone has to keep jobs out, as
+    // jobs never pass through the sampler that keeps every other protocol out.
+    const runner = createRunner(undefined, false);
+
+    const seen = await runner.run(job, async () => observeRun());
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    expect(seen.traceId).toEqual(expect.any(String));
+    expect(seen.traced).toBe(false);
+    expect(insertJobSnapshot).not.toHaveBeenCalled();
   });
 });
 

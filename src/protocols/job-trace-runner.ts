@@ -200,6 +200,11 @@ export class JobTraceRunner<Store extends Record<string, unknown>> {
    * stop the job itself from running.
    */
   private isIgnored(context: JobContext): boolean {
+    // Jobs never reach the sampler, which is where every other protocol
+    // learns that the agent is disabled.
+    if (this.options.enabled === false) {
+      return true;
+    }
     try {
       return Boolean(this.options.jobs?.ignore?.(context));
     } catch (error) {

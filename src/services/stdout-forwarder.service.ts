@@ -93,7 +93,7 @@ export class StdoutForwarderService implements OnModuleInit, OnModuleDestroy {
         ? null
         : new LogRedactor(this.options.redaction);
 
-    if (this.options.forwardLogs) {
+    if (this.options.forwardLogs && this.options.enabled !== false) {
       this.start();
     }
   }

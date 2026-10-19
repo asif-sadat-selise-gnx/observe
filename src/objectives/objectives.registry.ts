@@ -83,6 +83,7 @@ export class ObjectivesRegistry implements OnModuleInit {
   private readonly byHandler = new Map<string, HandlerObjectives>();
   private readonly statedAt = new Map<string, number>();
   private readonly refusedRoutes = new Set<string>();
+  private readonly refusedRenamedHandlers = new Set<string>();
 
   constructor(
     private readonly discoveryService: DiscoveryService,
@@ -213,6 +214,19 @@ export class ObjectivesRegistry implements OnModuleInit {
     }
     const handler = this.handlerOf(snapshot.traces);
     if (!handler) {
+      return undefined;
+    }
+    // A renamed request reports under the application's own name, and the
+    // collector keeps one SLO per handler: declared from requests named per
+    // call, that SLO would move to each new name in turn - the reason a
+    // handler mounted on several routes is refused at boot.
+    if (snapshot.attributes?.defaultOperationId !== undefined) {
+      if (!this.refusedRenamedHandlers.has(handler)) {
+        this.refusedRenamedHandlers.add(handler);
+        this.logger.warn(
+          `@Objective on ${handler} not declared for requests renamed with setOperationId: an SLO watches one route, and each name is a route of its own.`,
+        );
+      }
       return undefined;
     }
     const declared = this.byHandler.get(handler)!;

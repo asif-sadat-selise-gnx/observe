@@ -104,5 +104,18 @@ export interface RequestSnapshot {
      * operation id but not a document.
      */
     originalUrl?: string;
+    /**
+     * The operation id a request had before `TracerService.setOperationId`
+     * renamed it: its route, its GraphQL root field, its message pattern.
+     * Present only on a renamed request. It tells the collector that the
+     * operation id is the application's own name, and what the request is
+     * grouped under without it.
+     *
+     * An attribute rather than a field of its own because the collector
+     * refuses a snapshot key it does not know but takes the attributes
+     * whole, so an agent sending it still reaches a collector that predates
+     * it.
+     */
+    defaultOperationId?: string;
   };
 }

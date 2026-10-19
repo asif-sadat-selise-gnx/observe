@@ -97,6 +97,59 @@ describe("ObjectivesRegistry", () => {
     ).toBeUndefined();
   });
 
+  describe("a request renamed with setOperationId", () => {
+    let warn: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      warn = vi.spyOn(Logger.prototype, "warn").mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      warn.mockRestore();
+    });
+
+    const renamed = (operationId: string) =>
+      snapshot([node("OrdersController", "create")], {
+        operationId,
+        attributes: { method: "POST", defaultOperationId: "/api/v1/orders" },
+      });
+
+    it("declares nothing, so one SLO is not moved from name to name", () => {
+      const built = registry();
+
+      // The collector keeps one SLO per handler, so a declaration per name
+      // would move it to whichever name was stated last.
+      expect(built.declarationFor(renamed("/rpc/orders.list"))).toBeUndefined();
+      expect(built.declarationFor(renamed("/rpc/orders.get"))).toBeUndefined();
+    });
+
+    it("says so once per handler", () => {
+      const built = registry();
+      const refusals = () =>
+        warn.mock.calls.filter((call: unknown[]) =>
+          String(call[0]).includes("renamed with setOperationId"),
+        );
+
+      built.declarationFor(renamed("/rpc/orders.list"));
+      built.declarationFor(renamed("/rpc/orders.get"));
+
+      expect(refusals()).toHaveLength(1);
+      expect(String(refusals()[0][0])).toContain("OrdersController.create");
+    });
+
+    it("leaves the same handler's routed requests declared", () => {
+      const built = registry();
+      built.declarationFor(renamed("/rpc/orders.list"));
+
+      expect(
+        built.declarationFor(snapshot([node("OrdersController", "create")])),
+      ).toMatchObject({
+        handler: "OrdersController.create",
+        operationId: "/api/v1/orders",
+      });
+    });
+  });
+
   describe("the method a route is declared under", () => {
     class StatusController {
       @Get()
