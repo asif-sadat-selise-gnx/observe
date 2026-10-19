@@ -65,4 +65,70 @@ describe("describeSqlStatement", () => {
     );
     expect(statement.length).toBeLessThanOrEqual(2048);
   });
+
+  // Only the first 8 KB is read, and a long comment or literal shrinks to
+  // almost nothing: what the bound cut in two lands inside what is shipped.
+  const comment = (length: number) => `/*${"x".repeat(length)}*/`;
+  it.each([
+    [`SELECT ${comment(8170)} 'secret-value' FROM t`, "SELECT ?"],
+    [`SELECT ${comment(8172)} 'secret\\'s' FROM t`, "SELECT ?"],
+    [`SELECT ${comment(8170)} $tag$secret body$tag$`, "SELECT ?"],
+    [`SELECT ${comment(8170)} /* user:secret-value */`, "SELECT"],
+    [`SELECT ${comment(8173)} 987654e2`, "SELECT ?"],
+    [`SELECT ${comment(8172)} 987654e+2`, "SELECT ?"],
+    [`SELECT ${comment(8172)} 987654e-2`, "SELECT ?"],
+    [`SELECT ${comment(8170)} 98765.43e+2`, "SELECT ?.?"],
+    [
+      `INSERT INTO t (a, b) VALUES ('${"z".repeat(8150)}', 'secret-value')`,
+      "INSERT INTO t (a, b) VALUES (?, ?",
+    ],
+  ])("ships no part of a value the input bound cuts: %#", (sql, statement) => {
+    expect(describeSqlStatement(sql).statement).toBe(statement);
+  });
+
+  it.each([
+    [
+      "SELECT * FROM users WHERE pw = 'hunter2--x'\nAND id = 1",
+      "SELECT * FROM users WHERE pw = ? AND id = ?",
+    ],
+    [
+      "SELECT * FROM t WHERE a = 'secret-a$$b' AND b = $$secret-c$$",
+      "SELECT * FROM t WHERE a = ? AND b = ?",
+    ],
+    [
+      `SELECT "it's" FROM t WHERE name = 'secret-value'`,
+      `SELECT "it's" FROM t WHERE name = ?`,
+    ],
+    [
+      "SELECT `it's` FROM t WHERE name = 'secret-value'",
+      "SELECT `it's` FROM t WHERE name = ?",
+    ],
+    [
+      `SELECT "a--b" FROM t WHERE name = 'secret-value'`,
+      `SELECT "a--b" FROM t WHERE name = ?`,
+    ],
+    [
+      "SELECT * FROM t WHERE name = 'secret-value",
+      "SELECT * FROM t WHERE name = ?",
+    ],
+  ])(
+    "reads a quote or comment marker inside another token as part of it: %s",
+    (sql, statement) => {
+      expect(describeSqlStatement(sql).statement).toBe(statement);
+    },
+  );
+
+  it("redacts a token cut by the input bound in linear time", () => {
+    const sql = `SELECT ${"a".repeat(8180)} , secret_column FROM t`;
+    const timings: number[] = [];
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const startedAt = performance.now();
+      describeSqlStatement(sql);
+      timings.push(performance.now() - startedAt);
+    }
+    expect(Math.min(...timings)).toBeLessThan(50);
+    expect(describeSqlStatement(sql).statement).toBe(
+      `SELECT ${"a".repeat(2041)}`,
+    );
+  });
 });

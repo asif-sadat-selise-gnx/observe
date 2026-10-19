@@ -26,6 +26,18 @@ export interface SqlStatementDescription {
 }
 
 /**
+ * Comments, quoted identifiers, dollar-quoted bodies (Postgres) and strings,
+ * matched in one left-to-right pass: a comment marker inside a string, or a
+ * quote inside a comment or an identifier, is part of the token it is in.
+ * Each runs to the end of the input when nothing closes it. A dollar quote
+ * cannot open inside a word, where Postgres reads `$` as part of a name.
+ * Strings take doubled-quote and backslash escapes. Identifiers are kept as
+ * they are.
+ */
+const QUOTED_OR_COMMENT =
+  /(\/\*[\s\S]*?(?:\*\/|$)|--[^\n]*)|("(?:[^"]|"")*(?:"|$)|`(?:[^`]|``)*(?:`|$))|(?<!\w)\$(?<tag>[A-Za-z_]*)\$[\s\S]*?(?:\$\k<tag>\$|$)|'(?:[^'\\]|\\[\s\S]?|'')*(?:'|$)/g;
+
+/**
  * Strips a SQL statement of its values.
  *
  * Bound parameters never reach this function - only the text does - but
@@ -35,16 +47,23 @@ export interface SqlStatementDescription {
  * put request ids and user ids in them.
  */
 export function describeSqlStatement(sql: string): SqlStatementDescription {
-  const statement = sql
-    .slice(0, MAX_STATEMENT_LENGTH * 4)
-    .replace(/\/\*[\s\S]*?\*\//g, " ")
-    .replace(/--[^\n]*/g, " ")
-    // Dollar-quoted (Postgres), then single-quoted with doubled-quote and
-    // backslash escapes. Double quotes and backticks are identifiers - kept.
-    .replace(/\$([A-Za-z_]*)\$[\s\S]*?\$\1\$/g, "?")
-    .replace(/'(?:[^'\\]|\\.|'')*'/g, "?")
+  const input = sql.slice(0, MAX_STATEMENT_LENGTH * 4);
+  let sanitized = input
+    .replace(QUOTED_OR_COMMENT, (token, comment, identifier) =>
+      comment !== undefined ? " " : identifier !== undefined ? token : "?",
+    )
     // A number that is not part of an identifier or a `$1` placeholder.
-    .replace(/(?<![\w$])-?\d+(?:\.\d+)?(?:e[+-]?\d+)?(?![\w])/gi, "?")
+    .replace(/(?<![\w$])-?\d+(?:\.\d+)?(?:e[+-]?\d+)?(?![\w])/gi, "?");
+  if (sql.length > input.length) {
+    // The bound may have cut a number short - `987654e+` is no longer one -
+    // so whatever word it cut goes too. Anchored at the run's start, which
+    // keeps it linear on a run 8 KB long.
+    sanitized = sanitized.replace(
+      /(^|[^\p{L}\p{M}\p{N}_$])[\p{L}\p{M}\p{N}_$]+[+-]?$/u,
+      "$1?",
+    );
+  }
+  const statement = sanitized
     .replace(/\(\s*\?(?:\s*,\s*\?)+\s*\)/g, "(?)")
     .replace(/\(\s*\$\d+(?:\s*,\s*\$\d+)+\s*\)/g, "($n)")
     .replace(/\s+/g, " ")
