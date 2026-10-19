@@ -134,7 +134,11 @@ const REQUEST_SNAPSHOT: Shape = {
   ti: { type: "string", required: true, maxLength: 255 },
   d: { type: "number" },
   p: { type: "string" },
-  op: { type: "string" },
+  // Required as the API requires it. The application can set it now
+  // (`TracerService.setOperationId`), so an unusable one can reach a batch, and
+  // a repair that only stripped it would re-send an entry the API refuses
+  // again - costing the whole batch rather than the one operation.
+  op: { type: "string", required: true },
   u: { type: "string" },
   tg: { type: "object" },
   e: { type: "object" },

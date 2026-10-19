@@ -1,7 +1,9 @@
+import { Logger } from "@nestjs/common";
 import { AsyncLocalStorage } from "async_hooks";
 import { ObserveAgentSharedBuffer } from "../agent/observe-agent.shared-buffer.js";
 import { CustomMetric } from "../interfaces/index.js";
 import { ObserveModuleOptionsWithDefaults } from "../interfaces/observe-options.interface.js";
+import { RequestSnapshot } from "../interfaces/request-snapshot.interface.js";
 import {
   CALLER_METADATA_KEY,
   TRACE_REGISTRY_KEY,
@@ -248,6 +250,77 @@ describe("TracerService", () => {
       });
 
       expect(registry.hasTrace("unsampled")).toBe(false);
+    });
+
+    /** The operation id `name` leaves on a request named "GET /orders". */
+    const reportedAfter = async (name: unknown) => {
+      await inTrace("named", (spanId) => {
+        tracer.setOperationId(name as string);
+        registry.internalEndTraceStep(
+          "named",
+          spanId,
+          "OrdersController",
+          "findAll",
+          spanId,
+        );
+      });
+      registry.endTrace("named");
+      const snapshot = await registry.pluckSnapshot("named");
+      return (snapshot as RequestSnapshot).operationId;
+    };
+
+    it("trims the name", async () => {
+      expect(await reportedAfter("  /rpc/orders.list\n")).toBe(
+        "/rpc/orders.list",
+      );
+    });
+
+    it("cuts a long name to 255 characters, counted as the collector counts them", async () => {
+      const reported = await reportedAfter(`/rpc/${"😀".repeat(300)}`);
+
+      expect(Array.from(reported!)).toHaveLength(255);
+      // Cut between characters, never inside a surrogate pair.
+      expect(reported!.endsWith("😀")).toBe(true);
+    });
+
+    describe("given something other than a non-blank string", () => {
+      let warn: ReturnType<typeof vi.spyOn>;
+
+      beforeEach(() => {
+        warn = vi.spyOn(Logger.prototype, "warn").mockImplementation(() => {});
+      });
+
+      afterEach(() => {
+        warn.mockRestore();
+      });
+
+      // Typed as a string, but often read off a request body: a number would
+      // have the collector refuse the batch, a blank name would drop the
+      // request.
+      it.each([
+        ["an empty string", ""],
+        ["a blank string", "  "],
+        ["a number", 42],
+        ["an object", { method: "orders.list" }],
+        ["null", null],
+        ["undefined", undefined],
+      ])("ignores %s and keeps the route", async (_, name) => {
+        expect(await reportedAfter(name)).toBe("GET /orders");
+      });
+
+      it("says so once, not on every request", () => {
+        als.run(new Map([[TRACE_ID_KEY, "named"]]), () => {
+          tracer.setOperationId(42 as never);
+          tracer.setOperationId("");
+        });
+
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn).toHaveBeenCalledWith(
+          expect.stringContaining(
+            "setOperationId ignored a value of type number",
+          ),
+        );
+      });
     });
   });
 

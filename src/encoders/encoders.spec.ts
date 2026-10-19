@@ -840,7 +840,7 @@ describe("RuntimeMetricsEncoder", () => {
 describe("telemetry wire contract", () => {
   const valid = {
     serviceId: "svc",
-    snapshots: [{ ti: "trace-1", d: 1, t: [] }],
+    snapshots: [{ ti: "trace-1", op: "/orders", d: 1, t: [] }],
   };
 
   it("accepts a well-formed batch", () => {
@@ -859,7 +859,7 @@ describe("telemetry wire contract", () => {
     expect(
       validateTelemetryPayload({
         serviceId: "svc",
-        snapshots: [{ ti: "trace-1" }],
+        snapshots: [{ ti: "trace-1", op: "/orders" }],
         jobs: [{ i: "job-1", ti: "trace-2" }],
       }),
     ).toEqual(["snapshots[0].t: required", "jobs[0].t: required"]);
@@ -902,7 +902,7 @@ describe("telemetry wire contract", () => {
     expect(
       validateTelemetryPayload({
         serviceId: "svc",
-        snapshots: [{ ti: "trace-1", t: [], a: { sc: "200" } }],
+        snapshots: [{ ti: "trace-1", op: "/orders", t: [], a: { sc: "200" } }],
       }),
     ).toEqual(["snapshots[0].a.sc: expected a number, got string"]);
   });
@@ -914,6 +914,7 @@ describe("telemetry wire contract", () => {
         snapshots: [
           {
             ti: "trace-1",
+            op: "/orders",
             t: [
               {
                 o: "auto",
@@ -938,7 +939,7 @@ describe("telemetry wire contract", () => {
     // rejects - only the pipe configured with `forbidNonWhitelisted` refuses.
     const payload = {
       serviceId: "svc",
-      snapshots: [{ ti: "trace-1", t: [], zz: 1 }],
+      snapshots: [{ ti: "trace-1", op: "/orders", t: [], zz: 1 }],
     };
 
     expect(validateTelemetryPayload(payload)).toEqual([]);

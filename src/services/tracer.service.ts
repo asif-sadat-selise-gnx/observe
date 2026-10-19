@@ -1,4 +1,4 @@
-import { Inject, Injectable } from "@nestjs/common";
+import { Inject, Injectable, Logger } from "@nestjs/common";
 import { AsyncLocalStorage } from "async_hooks";
 import { ObserveAgentSharedBuffer } from "../agent/observe-agent.shared-buffer.js";
 import { Gauge, GaugeKind, Summary } from "../custom-metrics/index.js";
@@ -14,6 +14,13 @@ import {
 } from "../observe.constants.js";
 import { OperationTraceRegistry } from "./operation-trace.registry.js";
 
+/**
+ * Longest operation id the collector stores, counted by code point as it
+ * counts. A longer one is cut there anyway; cut here, a name built from a
+ * request body cannot grow the batch it rides in without bound.
+ */
+const MAX_OPERATION_ID_LENGTH = 255;
+
 @Injectable()
 export class TracerService<
   Store extends Record<string | symbol, unknown> = Record<
@@ -28,6 +35,8 @@ export class TracerService<
   private readonly counters = new Map<string, Counter<any>>();
   private readonly gauges = new Map<string, Gauge<any>>();
   private readonly summaries = new Map<string, Summary<any>>();
+  private readonly logger = new Logger(TracerService.name);
+  private hasReportedUnusableOperationId = false;
 
   constructor(
     private readonly operationTraceRegistry: OperationTraceRegistry,
@@ -336,18 +345,56 @@ export class TracerService<
   }
 
   /**
-   * Sets the operation id reported for the current request trace.
-   * Call from the handler to override the route path or GraphQL operation name.
-   * Use a stable name, not a per-request value, so requests aggregate together.
-   * Does nothing when there is no active trace or the request is not recorded.
+   * Sets the operation id reported for the current request trace, in place of
+   * its route path, GraphQL root field or message pattern. Works from anywhere
+   * in the request - middleware, guard, interceptor or handler - and a later
+   * call replaces an earlier one.
+   *
+   * Use a stable, bounded name, not a per-request value, so requests aggregate
+   * together. The name is trimmed and cut to 255 characters, and anything but
+   * a non-blank string is ignored. Does nothing when there is no active trace
+   * or the request is not recorded.
    */
   setOperationId(operationId: string): void {
+    // Typed, but often read off a request body, which nothing checks at
+    // runtime: a number would have the collector refuse the batch it rides in,
+    // and a blank name would have the agent drop the request, error and all.
+    const name = typeof operationId === "string" ? operationId.trim() : "";
+    if (!name) {
+      this.reportUnusableOperationId(operationId);
+      return;
+    }
     const store = this.als.getStore();
     const traceId =
       store?.get(TRACE_REGISTRY_KEY) ?? store?.get(this.options.traceIdKey);
     if (typeof traceId === "string") {
-      this.operationTraceRegistry.setOperationId(traceId, operationId);
+      this.operationTraceRegistry.setOperationId(
+        traceId,
+        name.length > MAX_OPERATION_ID_LENGTH
+          ? Array.from(name).slice(0, MAX_OPERATION_ID_LENGTH).join("")
+          : name,
+      );
     }
+  }
+
+  /**
+   * An unusable name comes from the same call site on every request, so it is
+   * reported once rather than once per request.
+   */
+  private reportUnusableOperationId(value: unknown): void {
+    if (this.hasReportedUnusableOperationId) {
+      return;
+    }
+    this.hasReportedUnusableOperationId = true;
+    const given =
+      value === null || value === undefined
+        ? String(value)
+        : typeof value === "string"
+          ? "a blank string"
+          : `a value of type ${typeof value}`;
+    this.logger.warn(
+      `setOperationId ignored ${given}: an operation id is a non-blank string. Later ones are not reported.`,
+    );
   }
 
   /**

@@ -305,6 +305,7 @@ describe("sanitizeTelemetryEntry", () => {
     it("drops an entry whose required field is over its limit", () => {
       const result = sanitizeTelemetryEntry("snapshots", {
         ti: "t".repeat(256),
+        op: "/users",
         t: [],
       });
 
@@ -324,6 +325,7 @@ describe("sanitizeTelemetryEntry", () => {
       });
       const entry: Record<string, unknown> = {
         ti: "t-1",
+        op: "/users",
         t: [span({ c: "C".repeat(256) }), span({ o: "other" }), span({})],
       };
 
@@ -420,6 +422,26 @@ describe("sanitizeTelemetryEntry", () => {
       expect(result.changed).toBe(true);
       expect(result.dropped).toBe(1);
       expect(payload.logs).toEqual([{ timestamp: 1, text: "kept" }]);
+    });
+
+    it("drops a snapshot with an unusable operation id rather than re-send it without one", () => {
+      // The API requires `op`: stripped and re-sent, the entry would be
+      // refused again, and the whole batch with it.
+      const payload: Record<string, unknown> = {
+        serviceId: "svc",
+        snapshots: [
+          { ti: "t-1", op: 42, t: [] },
+          { ti: "t-2", op: "/users", t: [] },
+        ],
+      };
+
+      const result = sanitizeTelemetryBatch(payload);
+
+      expect(result).toMatchObject({ changed: true, dropped: 1 });
+      expect(payload.snapshots).toEqual([{ ti: "t-2", op: "/users", t: [] }]);
+      expect(
+        validateTelemetryPayload(payload, { forbidUnknown: true }),
+      ).toEqual([]);
     });
 
     it("takes the operation id a renamed request replaced", () => {
@@ -542,7 +564,11 @@ describe("sanitizeTelemetryEntry", () => {
         `return (${createTelemetrySanitizer.toString()})`,
       )()(JSON.parse(JSON.stringify(SECTION_SHAPES)));
 
-      const entry: Record<string, unknown> = { ti: "t-1", st: 123 };
+      const entry: Record<string, unknown> = {
+        ti: "t-1",
+        op: "/users",
+        st: 123,
+      };
       const result = rebuilt.sanitizeEntry("snapshots", entry);
 
       expect(result.ok).toBe(true);
