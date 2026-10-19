@@ -47,7 +47,12 @@ jobs:
           --health-timeout 3s
           --health-retries 20
       mongo:
-        image: mongo:8
+        # Not mongo:8 while the runners' kernel is 6.19 to 7.0.13: MongoDB 8's
+        # TCMalloc breaks on those kernels, so mongod refuses to start there
+        # (SERVER-121912) and the job fails before a single test. 7.0 predates
+        # that allocator, and the driver suites pass on it unchanged. Back to 8
+        # once the runner image ships kernel 7.0.14 or later.
+        image: mongo:7
         ports:
           - 27027:27017
         options: >-
