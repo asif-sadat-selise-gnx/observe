@@ -521,19 +521,62 @@ describe("MSSQL statement sanitization", () => {
   );
 
   it.each([
-    ["SAVE TRANSACTION typeorm_1", "SAVE"],
-    ["ROLLBACK TRANSACTION typeorm_1", "ROLLBACK"],
-    ["DECLARE @t TABLE (id int)", "DECLARE"],
+    ["SAVE TRANSACTION typeorm_1", "SAVE", "SAVE TRANSACTION typeorm_1"],
+    [
+      "ROLLBACK TRANSACTION typeorm_1",
+      "ROLLBACK",
+      "ROLLBACK TRANSACTION typeorm_1",
+    ],
+    ["DECLARE @t TABLE (id int)", "DECLARE", "DECLARE @t TABLE (id int)"],
+    [
+      "SET NOCOUNT ON; SELECT * FROM users WHERE email = 'private@example.com'",
+      "SET",
+      "SET NOCOUNT ON; SELECT * FROM users WHERE email = ?",
+    ],
+    [
+      'DECLARE @OutputTable TABLE ("id" int); INSERT INTO "orders"("note") OUTPUT INSERTED."id" INTO @OutputTable VALUES (N\'private-value\'); SELECT * FROM @OutputTable',
+      "DECLARE",
+      'DECLARE @OutputTable TABLE ("id" int); INSERT INTO "orders"("note") OUTPUT INSERTED."id" INTO @OutputTable VALUES (?); SELECT * FROM @OutputTable',
+    ],
+    [
+      "IF EXISTS (SELECT 1 FROM users WHERE email = 'private@example.com') SELECT 1",
+      "IF",
+      "IF EXISTS (SELECT ? FROM users WHERE email = ?) SELECT ?",
+    ],
+    [
+      "BEGIN TRY EXEC dbo.Authenticate PrivateToken123; END TRY BEGIN CATCH END CATCH",
+      "BEGIN",
+      "BEGIN TRY EXEC dbo.Authenticate ?; END TRY BEGIN CATCH END CATCH",
+    ],
+    [
+      ";WITH c AS (SELECT 1 AS n) SELECT * FROM c",
+      "WITH",
+      "WITH c AS (SELECT ? AS n) SELECT * FROM c",
+    ],
   ])(
-    "records but does not capture other statements: %s",
-    async (sql, operation) => {
+    "captures other statements opening with a reserved word: %s",
+    async (sql, operation, statement) => {
       const h = harness();
       await h.run(() => new h.Request().query(sql));
       expect(h.nodes[0]).toMatchObject({
-        operation: operation.toUpperCase(),
-        tags: { "db.system": "mssql" },
+        operation,
+        tags: { "db.system": "mssql", "db.statement": statement },
       });
-      expect(h.nodes[0].tags).not.toHaveProperty("db.statement");
+      expect(JSON.stringify(h.nodes)).not.toMatch(/private|Private/);
+    },
+  );
+
+  it.each([
+    "THROW 51000, 'private-value', 1",
+    "RECEIVE PrivateToken123",
+    "; dbo.Authenticate PrivateToken456",
+  ])(
+    "omits statements opening with a word that could name a procedure: %s",
+    async (sql) => {
+      const h = harness();
+      await h.run(() => new h.Request().query(sql));
+      expect(h.nodes[0].tags).toEqual({ "db.system": "mssql" });
+      expect(JSON.stringify(h.nodes)).not.toMatch(/private|Private/);
     },
   );
 

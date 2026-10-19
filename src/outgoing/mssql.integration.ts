@@ -75,23 +75,27 @@ function describeMssqlStatement(
   if (truncated) {
     text = text.replace(/[\p{L}\p{M}\p{N}_$@#]+$/u, "?");
   }
-  const description = describeSanitizedSqlStatement(
+  // `;WITH` is how T-SQL is often written, to end whatever came before.
+  text = text.replace(/^[\s;]+/, "");
+  if (!CAPTURED_STATEMENT.test(text)) {
+    const verb = /^[\s(]*([A-Za-z]+)/.exec(text)?.[1]?.toUpperCase();
+    return { operation: verb ?? "QUERY" };
+  }
+  return describeSanitizedSqlStatement(
     redactExecArgs ? redactExecArguments(text) : text,
   );
-  if (CAPTURED_STATEMENT.test(text)) {
-    return description;
-  }
-  const verb = /^[\s(]*([A-Za-z]+)/.exec(text)?.[1]?.toUpperCase();
-  return { operation: verb ?? "QUERY" };
 }
 
 /**
  * A batch may open with a procedure call without EXEC, and its unquoted
  * arguments look like keywords. Statement text is kept only for batches
- * opening with these reserved words, which cannot name such a procedure.
+ * opening with a reserved word that starts a statement: a reserved word cannot
+ * name a procedure unquoted, so such a batch is never a call in disguise.
+ * Non-reserved statement words (`THROW`, `RECEIVE`, `SEND`) can, and are left
+ * out.
  */
 const CAPTURED_STATEMENT =
-  /^[\s(]*(?:SELECT|INSERT|UPDATE|DELETE|MERGE|WITH|EXEC|EXECUTE)(?![\p{L}\p{M}\p{N}\p{Pc}@$#])/iu;
+  /^[\s(]*(?:SELECT|INSERT|UPDATE|DELETE|MERGE|WITH|EXEC|EXECUTE|SET|DECLARE|IF|WHILE|BEGIN|COMMIT|ROLLBACK|SAVE|TRUNCATE|CREATE|ALTER|DROP|USE|PRINT|RAISERROR|WAITFOR|GRANT|REVOKE|DENY|RETURN|OPEN|CLOSE|FETCH|DEALLOCATE|BREAK|CONTINUE|GOTO|KILL|DBCC|BACKUP|RESTORE|CHECKPOINT|RECONFIGURE|BULK|SETUSER|REVERT|SHUTDOWN|READTEXT|WRITETEXT|UPDATETEXT)(?![\p{L}\p{M}\p{N}\p{Pc}@$#])/iu;
 
 function findExec(source: string, start: number) {
   for (let index = start; index < source.length; ) {
