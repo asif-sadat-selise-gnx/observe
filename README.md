@@ -466,7 +466,7 @@ The MSSQL unit suite uses the real driver's public request APIs with stubbed tra
 $ docker run -d -p 6379:6379 redis:7-alpine
 $ docker run -d -p 54321:5432 -e POSTGRES_PASSWORD=postgres-whisprr postgres:16-alpine
 $ docker run -d -p 3306:3306 -e MYSQL_ROOT_PASSWORD=root -e MYSQL_DATABASE=test mysql:8
-$ docker run -d -p 27027:27017 mongo:8
+$ docker run -d -p 27027:27017 mongo:7
 ```
 
 To point them elsewhere, set `REDIS_HOST`/`REDIS_PORT`, `PGHOST`/`PGPORT`/`PGUSER`/`PGPASSWORD`/`PGDATABASE`, `MYSQL_HOST`/`MYSQL_PORT`/`MYSQL_USER`/`MYSQL_PASSWORD`/`MYSQL_DATABASE` or `MONGO_HOST`/`MONGO_PORT`.
