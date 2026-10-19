@@ -792,6 +792,20 @@ describe("MSSQL statement sanitization", () => {
     });
     expect(JSON.stringify(h.nodes)).not.toMatch(/987654/);
   });
+
+  it.each([
+    [`SELECT /*${"x".repeat(8172)}*/ 987654e+2`, "SELECT ?"],
+    [`SELECT /*${"x".repeat(8172)}*/ 987654e-2`, "SELECT ?"],
+    [`SELECT /*${"x".repeat(8170)}*/ 98765.43e+2`, "SELECT ?.?"],
+  ])(
+    "redacts a number cut off after its exponent sign: %#",
+    async (sql, statement) => {
+      const h = harness();
+      await h.run(() => new h.Request().query(sql));
+      expect(h.nodes[0].tags?.["db.statement"]).toBe(statement);
+      expect(JSON.stringify(h.nodes)).not.toMatch(/987|43/);
+    },
+  );
 });
 
 describe("MSSQL startup registration", () => {

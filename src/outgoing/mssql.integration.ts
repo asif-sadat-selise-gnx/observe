@@ -78,9 +78,11 @@ function describeMssqlStatement(
   if (truncated) {
     // Anchored at the run's start. Unanchored, the engine tried every position
     // inside each run of word characters and backtracked the run each time:
-    // quadratic, 0.1 s of a blocked event loop for one 8 KB name.
+    // quadratic, 0.1 s of a blocked event loop for one 8 KB name. The sign is
+    // a number cut between its exponent's sign and digits, `987654e+`, which
+    // the tokenizer could not read as a number and left as text.
     text = text.replace(
-      /(^|[^\p{L}\p{M}\p{N}_$@#])[\p{L}\p{M}\p{N}_$@#]+$/u,
+      /(^|[^\p{L}\p{M}\p{N}_$@#])[\p{L}\p{M}\p{N}_$@#]+[+-]?$/u,
       "$1?",
     );
   }
