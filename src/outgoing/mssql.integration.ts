@@ -234,7 +234,13 @@ export function patchMssql(
   const wrap = (method: string) => (original: (...args: any[]) => any) =>
     function (this: MssqlRequest, ...args: any[]) {
       const [command, callback] = args;
-      if (typeof command !== "string" || typeof callback !== "function") {
+      // Asked first: describing a statement means tokenizing it, which an
+      // untraced or sampled-out call should not pay for.
+      if (
+        typeof command !== "string" ||
+        typeof callback !== "function" ||
+        !recorder.isRecording()
+      ) {
         return original.apply(this, args);
       }
       let sql = command;

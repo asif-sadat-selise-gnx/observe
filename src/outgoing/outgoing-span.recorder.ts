@@ -96,6 +96,25 @@ export class OutgoingSpanRecorder {
     };
   }
 
+  /**
+   * Whether `open` would attach a span here - asked first by an integration
+   * whose description of a call costs more than the call's own bookkeeping
+   * (a statement it has to tokenize), so that untraced and sampled-out calls
+   * do not pay for a description nobody will read.
+   */
+  isRecording(): boolean {
+    if (this.covered.getStore()) {
+      return false;
+    }
+    const store = this.asyncLocalStorage.getStore();
+    const registryKey =
+      store?.get(TRACE_REGISTRY_KEY) ?? store?.get(this.traceIdKey);
+    return (
+      typeof registryKey === "string" &&
+      this.operationTraceRegistry.hasTrace(registryKey)
+    );
+  }
+
   /** Runs `fn` with nested entry points told the call is already covered. */
   cover<T>(fn: () => T): T {
     return this.covered.run(true, fn);

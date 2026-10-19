@@ -33,6 +33,7 @@ function createRecorder(sampled = true) {
   > = [];
   const storage = new AsyncLocalStorage<Map<any, any>>();
   const registry = new OperationTraceRegistry(storage, false);
+  vi.spyOn(registry, "hasTrace").mockImplementation(() => sampled);
   vi.spyOn(registry, "internalStartTraceStep").mockImplementation(
     (registryKey, className, operation, callerId) => {
       if (!sampled) {
@@ -438,6 +439,7 @@ describe("patchMssql", () => {
         },
         sampled,
       );
+      const open = vi.spyOn(h.recorder, "open");
       const request = new h.Request();
       if (sampled) {
         await request.query("SELECT 1");
@@ -445,6 +447,8 @@ describe("patchMssql", () => {
         await h.run(() => request.query("SELECT 1"));
       }
       expect(h.nodes).toEqual([]);
+      // Not even described: the statement is tokenized only for a span.
+      expect(open).not.toHaveBeenCalled();
     },
   );
 
