@@ -173,7 +173,12 @@ describe("ObserveModule: HTTP collection", () => {
       );
       expect(snapshot).toMatchObject({
         protocol: "http",
-        attributes: { method: "POST", originalUrl: "/rpc", statusCode: 201 },
+        attributes: {
+          method: "POST",
+          originalUrl: "/rpc",
+          statusCode: 201,
+          defaultOperationId: "/rpc",
+        },
       });
       expect(snapshot.traces.length).toBeGreaterThan(0);
     }

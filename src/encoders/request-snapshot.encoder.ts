@@ -7,6 +7,7 @@ const ATTRIBUTES_KEY_MAP = {
   method: "m",
   statusCode: "sc",
   originalUrl: "ou",
+  defaultOperationId: "dop",
 } as const satisfies Record<keyof RequestSnapshot["attributes"], string>;
 
 const SNAPSHOT_KEY_MAP = {

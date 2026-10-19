@@ -309,6 +309,23 @@ describe("RequestSnapshotEncoder", () => {
     });
   });
 
+  it("sends the operation id a renamed request replaced as an attribute", () => {
+    const encoded = RequestSnapshotEncoder.encode({
+      traceId: "trace-1",
+      protocol: "http",
+      operationId: "/rpc/orders.list",
+      attributes: {
+        method: "POST",
+        originalUrl: "/rpc",
+        defaultOperationId: "/rpc",
+      },
+      traces: [],
+    }) as Record<string, any>;
+
+    expect(encoded.op).toBe("/rpc/orders.list");
+    expect(encoded.a).toEqual({ m: "POST", ou: "/rpc", dop: "/rpc" });
+  });
+
   it("encodes the trace tree recursively", () => {
     const encoded = RequestSnapshotEncoder.encode(snapshot) as Record<
       string,

@@ -422,6 +422,25 @@ describe("sanitizeTelemetryEntry", () => {
       expect(payload.logs).toEqual([{ timestamp: 1, text: "kept" }]);
     });
 
+    it("takes the operation id a renamed request replaced", () => {
+      const payload: Record<string, unknown> = {
+        serviceId: "svc",
+        snapshots: [
+          {
+            ti: "t-1",
+            op: "/rpc/orders.list",
+            a: { m: "POST", sc: 201, ou: "/rpc", dop: "/rpc" },
+            t: [],
+          },
+        ],
+      };
+
+      expect(
+        validateTelemetryPayload(payload, { forbidUnknown: true }),
+      ).toEqual([]);
+      expect(sanitizeTelemetryBatch(payload).changed).toBe(false);
+    });
+
     it("removes unusable runtime metrics without touching the rest", () => {
       const payload: Record<string, unknown> = {
         serviceId: "svc",

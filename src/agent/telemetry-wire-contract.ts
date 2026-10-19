@@ -101,10 +101,16 @@ const TRACE_NODE: Shape = {
   ch: { type: "object", array: true, recursive: true },
 };
 
+/**
+ * The API takes the attributes as one object and checks none of its keys,
+ * so these are not refused there. They are declared all the same: a repair
+ * removes what is undeclared, and `dop` is what marks a request as renamed.
+ */
 const REQUEST_ATTRIBUTES: Shape = {
   m: { type: "string" },
   sc: { type: "number" },
   ou: { type: "string" },
+  dop: { type: "string" },
 };
 
 /**

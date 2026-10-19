@@ -587,12 +587,92 @@ describe("OperationTraceRegistry", () => {
         traceId: "custom",
         protocol: "http",
         operationId: "/rpc/orders.list",
-        attributes: { method: "POST", originalUrl: "/rpc", statusCode: 201 },
+        attributes: {
+          method: "POST",
+          originalUrl: "/rpc",
+          statusCode: 201,
+          defaultOperationId: "/rpc",
+        },
         tags: { tenant: "acme" },
         userId: "u-1",
         traces: [{ spanId, className: "RpcController", methodKey: "handle" }],
       });
       expect(snapshot!.traces).toHaveLength(1);
+    });
+
+    /** Runs the handler's span, then ends the request and plucks it. */
+    const finishRequest = async (traceId: string) => {
+      const spanId = registry.internalStartTraceStep(
+        traceId,
+        "RpcController",
+        "handle",
+        undefined,
+      );
+      registry.internalEndTraceStep(
+        traceId,
+        spanId,
+        "RpcController",
+        "handle",
+        spanId,
+      );
+      registry.endTrace(traceId, { statusCode: 201 });
+      return (await registry.pluckSnapshot(traceId)) as RequestSnapshot;
+    };
+
+    it("keeps a name set before the route is known, as middleware sets it", async () => {
+      // Nest fires the route hook after middleware has run, and the hook names
+      // the trace after its route: the name set first must still win.
+      registry.startTrace("early", {
+        protocol: "http",
+        attributes: { method: "POST", originalUrl: "/rpc" },
+      });
+      registry.setOperationId("early", "/rpc/orders.list");
+      registry.addRouteMetadataToTrace("early", 1, "/rpc");
+
+      expect(await finishRequest("early")).toMatchObject({
+        operationId: "/rpc/orders.list",
+        attributes: { defaultOperationId: "/rpc" },
+      });
+    });
+
+    it("keeps the path a request that matched no route is grouped under", async () => {
+      registry.startTrace("unrouted", {
+        protocol: "http",
+        attributes: { method: "POST", originalUrl: "/rpc?trace=1" },
+      });
+      registry.setOperationId("unrouted", "/rpc/orders.list");
+
+      expect(await finishRequest("unrouted")).toMatchObject({
+        operationId: "/rpc/orders.list",
+        attributes: { defaultOperationId: "/rpc" },
+      });
+    });
+
+    it("records no rename for the name a request already had", async () => {
+      registry.startTrace("same", {
+        protocol: "http",
+        attributes: { method: "POST", originalUrl: "/rpc" },
+      });
+      registry.addRouteMetadataToTrace("same", 1, "/rpc");
+      registry.setOperationId("same", "/rpc");
+
+      const snapshot = await finishRequest("same");
+      expect(snapshot.operationId).toBe("/rpc");
+      expect(snapshot.attributes).not.toHaveProperty("defaultOperationId");
+    });
+
+    it("has skipSpans judge the request by its new name", async () => {
+      registry.configureSkipSpans(
+        ({ operationId }) => operationId === "/rpc/health.check",
+      );
+      registry.startTrace("skipped", {
+        protocol: "http",
+        attributes: { method: "POST", originalUrl: "/rpc" },
+      });
+      registry.addRouteMetadataToTrace("skipped", 1, "/rpc");
+      registry.setOperationId("skipped", "/rpc/health.check");
+
+      expect((await finishRequest("skipped")).traces).toEqual([]);
     });
 
     it("overrides a GraphQL name and survives subsequent root field metadata", async () => {
@@ -622,6 +702,7 @@ describe("OperationTraceRegistry", () => {
 
       expect(await registry.pluckSnapshot("graphql")).toMatchObject({
         operationId: "OrdersOverview",
+        attributes: { defaultOperationId: "Query.orders" },
       });
     });
 
