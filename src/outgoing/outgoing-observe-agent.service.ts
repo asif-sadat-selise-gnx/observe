@@ -38,15 +38,18 @@ import { patchPg } from "./pg.integration.js";
  * so that happens on a single patch release of difference (its `mysql2`
  * 3.24.3 beside an application's 3.24.4); Mongoose asks for a minor range.
  * Queries through the ORM would then run on a copy nobody patched and simply
- * not appear, with nothing to say why.
+ * not appear, with nothing to say why. Prisma's SQL Server adapter asks for
+ * `mssql` ^12.2, so an application pinned outside that range runs Prisma's
+ * queries on a nested copy.
  *
- * TypeORM, Drizzle, Knex, Sequelize and Prisma's adapters take their driver
- * as a peer and need no entry.
+ * TypeORM, Drizzle, Knex and Sequelize take their driver as a peer and need
+ * no entry.
  */
 const DRIVER_DEPENDENTS = {
   pg: ["@mikro-orm/postgresql"],
   mysql2: ["@mikro-orm/mysql"],
   mongodb: ["mongoose", "@mikro-orm/mongodb"],
+  mssql: ["@prisma/adapter-mssql"],
 } as const;
 
 @Injectable()
@@ -83,7 +86,7 @@ export class OutgoingObserveAgentService implements OnApplicationShutdown {
         DRIVER_DEPENDENTS.mongodb,
         (module) => patchMongodb(module, recorder),
       );
-      this.patchDriver("mssql", "mssql", [], (module) =>
+      this.patchDriver("mssql", "mssql", DRIVER_DEPENDENTS.mssql, (module) =>
         patchMssql(module, recorder),
       );
     }
