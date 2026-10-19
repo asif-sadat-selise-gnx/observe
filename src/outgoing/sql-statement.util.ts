@@ -25,6 +25,75 @@ export interface SqlStatementDescription {
   statement: string;
 }
 
+/** The SQL a driver speaks, which decides what its quotes and comments mean. */
+export type SqlDialect = "postgresql" | "mysql";
+
+/**
+ * Comments, quoted names and literals, found left to right: a comment marker
+ * inside a string, or a quote inside a comment or a name, is part of the token
+ * it is in. Each runs to the end of the input when nothing closes it. Names
+ * are kept, comments become a space and literals `?`.
+ *
+ * Postgres quotes names in `"`. A plain string takes a backslash as it is and
+ * an `E'...'` string as an escape. A dollar quote opens only where a token
+ * can start - Postgres reads `a$b$` as one name - and block comments nest, so
+ * `/*` is matched alone and its end found by hand.
+ *
+ * MySQL quotes strings in `"` as well as `'`, as its default sql_mode does
+ * (under ANSI_QUOTES a `"` name goes too), with backslash escapes in both -
+ * NO_BACKSLASH_ESCAPES is not assumed - and `#` starts a comment. Its block
+ * comments do not nest.
+ */
+const TOKEN: Record<SqlDialect, RegExp> = {
+  postgresql:
+    /(?<nested>\/\*)|(?<comment>--[^\n]*)|(?<name>"(?:[^"]|"")*(?:"|$)|`(?:[^`]|``)*(?:`|$))|(?<![\w$])(?<escape>[eE])'(?:[^'\\]|\\[\s\S]?|'')*(?:'|$)|(?<plain>'(?:[^']|'')*(?:'|$))|(?<!\w)\$(?<tag>[A-Za-z_]*)\$[\s\S]*?(?:\$\k<tag>\$|$)/g,
+  mysql:
+    /(?<comment>\/\*[\s\S]*?(?:\*\/|$)|--[^\n]*|#[^\n]*)|(?<name>`(?:[^`]|``)*(?:`|$))|'(?:[^'\\]|\\[\s\S]?|'')*(?:'|$)|"(?:[^"\\]|\\[\s\S]?|"")*(?:"|$)/g,
+};
+
+function stripLiteralsAndComments(sql: string, dialect: SqlDialect): string {
+  const token = TOKEN[dialect];
+  token.lastIndex = 0;
+  let text = "";
+  let index = 0;
+  for (let match; (match = token.exec(sql)); index = token.lastIndex) {
+    text += sql.slice(index, match.index);
+    const { nested, comment, name, escape, plain } = match.groups!;
+    if (nested !== undefined) {
+      token.lastIndex = endOfNestedComment(sql, token.lastIndex);
+      text += " ";
+    } else if (comment !== undefined) {
+      text += " ";
+    } else if (name !== undefined) {
+      text += name;
+    } else if (plain !== undefined && /(?<!\\)(?:\\\\)*\\'/.test(plain)) {
+      // An odd run of backslashes before a quote: with
+      // standard_conforming_strings off, the quote does not end the string
+      // here, so where it does end is unknown - and so is everything after.
+      return `${text}?`;
+    } else {
+      text += `${escape ?? ""}?`;
+    }
+  }
+  return text + sql.slice(index);
+}
+
+/** Where a Postgres block comment opened before `index` ends. */
+function endOfNestedComment(sql: string, index: number): number {
+  for (let depth = 1; depth && index < sql.length; ) {
+    if (sql.startsWith("/*", index)) {
+      depth++;
+      index += 2;
+    } else if (sql.startsWith("*/", index)) {
+      depth--;
+      index += 2;
+    } else {
+      index++;
+    }
+  }
+  return index;
+}
+
 /**
  * Strips a SQL statement of its values.
  *
@@ -34,17 +103,27 @@ export interface SqlStatementDescription {
  * shipped is the statement's shape. Comments go too: ORMs and query taggers
  * put request ids and user ids in them.
  */
-export function describeSqlStatement(sql: string): SqlStatementDescription {
-  const sanitized = sql
-    .slice(0, MAX_STATEMENT_LENGTH * 4)
-    .replace(/\/\*[\s\S]*?\*\//g, " ")
-    .replace(/--[^\n]*/g, " ")
-    // Dollar-quoted (Postgres), then single-quoted with doubled-quote and
-    // backslash escapes. Double quotes and backticks are identifiers - kept.
-    .replace(/\$([A-Za-z_]*)\$[\s\S]*?\$\1\$/g, "?")
-    .replace(/'(?:[^'\\]|\\.|'')*'/g, "?")
-    // A number that is not part of an identifier or a `$1` placeholder.
-    .replace(/(?<![\w$])-?\d+(?:\.\d+)?(?:e[+-]?\d+)?(?![\w])/gi, "?");
+export function describeSqlStatement(
+  sql: string,
+  dialect: SqlDialect,
+): SqlStatementDescription {
+  const input = sql.slice(0, MAX_STATEMENT_LENGTH * 4);
+  let sanitized = stripLiteralsAndComments(input, dialect)
+    // A number that is not part of an identifier or a `$1` placeholder: hex,
+    // binary and octal too, and digits grouped with `_` (Postgres 16).
+    .replace(
+      /(?<![\w$])(?:0x[\da-f_]+|0b[01_]+|0o[0-7_]+|-?\d[\d_]*(?:\.[\d_]+)?(?:e[+-]?\d[\d_]*)?)(?![\w])/gi,
+      "?",
+    );
+  if (sql.length > input.length) {
+    // The bound may have cut a number short - `987654e+` is no longer one -
+    // so whatever word it cut goes too. Anchored at the run's start, which
+    // keeps it linear on a run 8 KB long.
+    sanitized = sanitized.replace(
+      /(^|[^\p{L}\p{M}\p{N}_$])[\p{L}\p{M}\p{N}_$]+[+-]?$/u,
+      "$1?",
+    );
+  }
   return describeSanitizedSqlStatement(sanitized);
 }
 

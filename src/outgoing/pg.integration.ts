@@ -28,7 +28,7 @@ export function patchPg(pg: PgModule, recorder: OutgoingSpanRecorder): boolean {
       if (typeof text !== "string" || typeof config?.submit === "function") {
         return original.apply(this, args);
       }
-      const { operation, statement } = describeSqlStatement(text);
+      const { operation, statement } = describeSqlStatement(text, "postgresql");
       const span = recorder.open("pg", operation, {
         "db.system": "postgresql",
         "db.statement": statement,
