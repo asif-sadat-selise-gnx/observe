@@ -14,10 +14,10 @@ describe("createObserveModule credentials from the environment", () => {
   const { ObserveModule } = createObserveModule();
   const envBefore = { ...process.env };
 
-  const resolved = (options: Partial<ObserveOptions>) => {
-    const provider = ObserveModule.forRoot(
-      options as ObserveOptions,
-    ).providers!.find(
+  // No cast: `ObserveModule.forRoot({ serviceId })` has to type-check, since
+  // that is all the AppModule of a linked project needs.
+  const resolved = (options: ObserveOptions) => {
+    const provider = ObserveModule.forRoot(options).providers!.find(
       (candidate) => (candidate as ValueProvider).provide === OBSERVE_OPTIONS,
     ) as ValueProvider;
     return provider.useValue as ObserveOptions;
