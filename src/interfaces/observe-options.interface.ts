@@ -153,6 +153,19 @@ export interface CreateObserveModuleOptions {
 
 export interface ObserveOptions {
   /**
+   * Whether the agent runs at all. `false` keeps the module in place - its
+   * providers, `TracerService` among them, still resolve - but records and
+   * sends nothing: no traces, runtime metrics or forwarded logs, no worker
+   * thread, and no request to any collector. It logs one line at startup
+   * saying so, and no warning about credentials, which it does not need.
+   *
+   * For environments that should not report, such as local development:
+   * `enabled: process.env.NODE_ENV === "production"`.
+   * @default true
+   */
+  enabled?: boolean;
+
+  /**
    * Application key identifying this service to the collector.
    *
    * Sign up at https://observe.nestjs.com and create a service; the dashboard

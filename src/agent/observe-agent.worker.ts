@@ -149,7 +149,13 @@ export class ObserveAgentWorker implements OnModuleInit, OnApplicationShutdown {
       this.options.flushInterval = MIN_FLUSH_INTERVAL;
     }
 
-    if (this.hasScaffoldCredentials) {
+    if (this.isDisabled) {
+      // Ahead of the credential checks: an agent switched off on purpose
+      // needs no key or secret, so a missing one is not worth a warning.
+      this.logger.log(
+        "Observe is disabled (enabled: false): nothing is recorded or sent.",
+      );
+    } else if (this.hasScaffoldCredentials) {
       // Nothing is sent, so there is no worker to start. The flush timer below
       // still runs and empties the buffer, which the instrumentation keeps
       // writing into either way.
@@ -578,9 +584,21 @@ export class ObserveAgentWorker implements OnModuleInit, OnApplicationShutdown {
     }
   }
 
+  /**
+   * Whether `enabled: false` switched the agent off - whatever the
+   * credentials, and whichever collector `endpoint` names.
+   */
+  private get isDisabled(): boolean {
+    return this.options.enabled === false;
+  }
+
   /** Whether nothing will be sent, so there is no worker to feed. */
   private get sendsNothing(): boolean {
-    return this.hasScaffoldCredentials || this.lacksHostedCredentials;
+    return (
+      this.isDisabled ||
+      this.hasScaffoldCredentials ||
+      this.lacksHostedCredentials
+    );
   }
 
   private get endpoint(): string {

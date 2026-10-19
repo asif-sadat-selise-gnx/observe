@@ -48,6 +48,12 @@ export class TraceSamplerService {
       operationId?: string;
     },
   ): boolean {
+    // Ahead of the sample rate: a disabled agent records nothing, whatever
+    // share of traces it was told to keep.
+    if (this.options.enabled === false) {
+      return false;
+    }
+
     if (!this.options.tracesSampleRate) {
       return true; // Always capture if sample rate is not set
     }
