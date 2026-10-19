@@ -80,6 +80,10 @@ describe("ObserveAgentWorker's notice while spans are withheld", () => {
       options,
       {} as NodeRuntimeMetricsService,
     );
+    // The first accepted batch is also announced; that line has its own spec
+    // (observe-agent.connected-notice.spec.ts), so it is taken as said here.
+    (agent as unknown as { reportedConnection: boolean }).reportedConnection =
+      true;
     const { logger } = agent as unknown as {
       logger: { warn: () => void; log: () => void };
     };
