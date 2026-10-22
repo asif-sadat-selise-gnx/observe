@@ -511,9 +511,9 @@ export class OperationTraceRegistry {
   ): void {
     const snapshot = this.traceSnapshots.get(traceId);
     if (!snapshot) {
-      this.logger.error(
-        `No snapshot found for traceId: "${traceId}". Cannot end trace step for "${className}#${methodKey}".`,
-      );
+      // The trace was dropped while this span was still open - `pluckSnapshot`
+      // gave up on it (and said so, once for the whole trace), or the client
+      // aborted. Nothing is left to record it in.
       return;
     }
     snapshot.refsMarkedAsComplete += 1;
@@ -765,6 +765,7 @@ export class OperationTraceRegistry {
           this.awaitingCompletion -= 1;
         }
         if (snapshot.refsCounter > snapshot.refsMarkedAsComplete) {
+          this.reportDroppedTrace(traceId, snapshot);
           cleanup();
           return undefined;
         }
@@ -807,6 +808,30 @@ export class OperationTraceRegistry {
       return snapshot;
     }
     return undefined;
+  }
+
+  /**
+   * One line per trace `pluckSnapshot` gives up on, naming the spans that kept
+   * it open. Their late ends are silent: one un-awaited call usually holds a
+   * whole chain of spans open, and a line per span said the same thing N times.
+   */
+  private reportDroppedTrace(
+    traceId: TraceId,
+    snapshot: SnapshotWithSignal,
+  ): void {
+    const open: string[] = [];
+    for (const node of this.callerIdsByTraceId.get(traceId)?.values() ?? []) {
+      if (node.type === "start") {
+        open.push(`"${node.className}#${node.methodKey}"`);
+      }
+    }
+    const operation =
+      ("operationId" in snapshot && snapshot.operationId) ||
+      ("name" in snapshot && snapshot.name) ||
+      traceId;
+    this.logger.warn(
+      `Trace "${traceId}" (${operation}) was not reported: ${open.join(", ") || "a span"} had not ended ${SNAPSHOT_COMPLETION_TIMEOUT_MS}ms after the operation did. Some of your async operations were not awaited and outlived the operation that started them. Ignore if this is the desired behavior.`,
+    );
   }
 
   /**
