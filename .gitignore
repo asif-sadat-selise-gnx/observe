@@ -19,3 +19,6 @@ yarn.lock
 
 # source-context.util.spec.ts scratch tree (cleaned up in afterAll)
 /.tmp-source-context-*
+
+# Claude Code
+.claude/worktrees/

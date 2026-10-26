@@ -24,3 +24,6 @@ vitest.setup.ts
 .oxlintrc.json
 .release-it.json
 /.vscode
+
+# Claude Code
+.claude/
