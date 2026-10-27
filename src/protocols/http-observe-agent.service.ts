@@ -37,7 +37,7 @@ const REQUEST_HOOKS = [
   "setOnRouteTriggered",
 ] as const;
 
-/** What the request hook reads of an Express or Fastify request. */
+/** What the request hook reads of an Express, Fastify or Node request. */
 interface IncomingHttpRequest {
   url: string;
   method: string;
@@ -334,7 +334,7 @@ export class HttpObserveAgentService<Store extends Record<string, unknown>>
    * Recognised by what the CORS spec defines a preflight to be - `OPTIONS`
    * with an `Access-Control-Request-Method` header - rather than by the
    * method alone, so an application's own `OPTIONS` handler is still traced.
-   * Both adapters lower-case header names.
+   * Every adapter lower-cases header names.
    */
   private isUntracedPreflight(req: IncomingHttpRequest): boolean {
     return (

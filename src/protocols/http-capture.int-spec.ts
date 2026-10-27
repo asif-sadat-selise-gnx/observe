@@ -1,6 +1,14 @@
-import { Body, Controller, Get, Module, Post } from "@nestjs/common";
+import {
+  Body,
+  Controller,
+  Get,
+  INestApplication,
+  Module,
+  Post,
+} from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
-import { NestExpressApplication } from "@nestjs/platform-express";
+import { ExpressAdapter } from "@nestjs/platform-express";
+import { NodeAdapter } from "@nestjs/platform-node";
 import request from "supertest";
 import { createObserveModule } from "../observe.module.js";
 import {
@@ -50,6 +58,8 @@ class CheckoutController {
 })
 class CaptureTestModule {}
 
+type Platform = "express" | "node";
+
 /**
  * `http.capture` with everything switched on, end to end: which requests are
  * singled out, what of them is kept, and what that looks like on the wire.
@@ -59,93 +69,103 @@ class CaptureTestModule {}
  * mistake ships a customer's payload: the body, the slow threshold, and an
  * application naming a header it should not have.
  */
-describe("ObserveModule: request capture", () => {
-  let app: NestExpressApplication;
-  let collected: CollectedSnapshots;
+describe.each<Platform>(["express", "node"])(
+  "ObserveModule: request capture (%s)",
+  (platform) => {
+    let app: INestApplication;
+    let collected: CollectedSnapshots;
 
-  beforeAll(async () => {
-    app = await NestFactory.create<NestExpressApplication>(CaptureTestModule, {
-      instrument: ObserveInstrument,
-      logger: false,
-    });
-    collected = collectSnapshots(app);
-    await app.init();
-  });
-
-  afterAll(async () => {
-    await app?.close();
-  });
-
-  beforeEach(() => collected.clear());
-
-  it("captures a request that was only slow, and leaves the fast one alone", async () => {
-    await request(app.getHttpServer())
-      .get("/slow")
-      .set("user-agent", "capture-int")
-      .set("x-tenant-id", "acme")
-      .expect(200);
-    await request(app.getHttpServer())
-      .get("/fast")
-      .set("user-agent", "capture-int")
-      .expect(200);
-
-    const slow = await waitForSnapshot(
-      collected,
-      (item) => item.operationId === "/slow",
-    );
-    expect(slow.error).toBeUndefined();
-    expect(slow.request?.headers).toEqual({
-      "user-agent": "capture-int",
-      "x-tenant-id": "acme",
+    beforeAll(async () => {
+      app = await NestFactory.create(
+        CaptureTestModule,
+        platform === "node" ? new NodeAdapter() : new ExpressAdapter(),
+        {
+          instrument: ObserveInstrument,
+          logger: false,
+        },
+      );
+      collected = collectSnapshots(app);
+      await app.init();
     });
 
-    const fast = await waitForSnapshot(
-      collected,
-      (item) => item.operationId === "/fast",
-    );
-    expect(fast.request).toBeUndefined();
-  });
+    afterAll(async () => {
+      await app?.close();
+    });
 
-  it("redacts the body by key, cuts it to the cap, and masks a sensitive header the application named", async () => {
-    await request(app.getHttpServer())
-      .post("/pay")
-      .set("user-agent", "capture-int")
-      .set("authorization", "Bearer should-never-leave")
-      .send({
-        password: "hunter2",
-        cardNumber: "4242424242424242",
-        note: "x".repeat(200),
-      })
-      .expect(500);
+    beforeEach(() => collected.clear());
 
-    const failed = await waitForSnapshot(
-      collected,
-      (item) => item.operationId === "/pay",
-    );
+    it("captures a request that was only slow, and leaves the fast one alone", async () => {
+      await request(app.getHttpServer())
+        .get("/slow")
+        .set("user-agent", "capture-int")
+        .set("x-tenant-id", "acme")
+        .expect(200);
+      await request(app.getHttpServer())
+        .get("/fast")
+        .set("user-agent", "capture-int")
+        .expect(200);
 
-    expect(failed.request?.headers?.authorization).toBe("[REDACTED]");
-    expect(Buffer.byteLength(failed.request!.body!)).toBeLessThanOrEqual(64);
-    expect(failed.request?.bodyTruncated).toBe(true);
-    const everything = JSON.stringify(failed);
-    expect(everything).not.toContain("hunter2");
-    expect(everything).not.toContain("should-never-leave");
-    expect(everything).not.toContain("4242424242424242");
-  });
+      const slow = await waitForSnapshot(
+        collected,
+        (item) => item.operationId === "/slow",
+      );
+      expect(slow.error).toBeUndefined();
+      expect(slow.request?.headers).toEqual({
+        "user-agent": "capture-int",
+        "x-tenant-id": "acme",
+      });
 
-  it("puts the capture on the wire as `rq`, beside the error and not inside it", async () => {
-    await request(app.getHttpServer()).post("/pay").send({ a: 1 }).expect(500);
+      const fast = await waitForSnapshot(
+        collected,
+        (item) => item.operationId === "/fast",
+      );
+      expect(fast.request).toBeUndefined();
+    });
 
-    const failed = await waitForSnapshot(
-      collected,
-      (item) => item.operationId === "/pay",
-    );
-    const encoded = RequestSnapshotEncoder.encode(failed) as Record<
-      string,
-      any
-    >;
+    it("redacts the body by key, cuts it to the cap, and masks a sensitive header the application named", async () => {
+      await request(app.getHttpServer())
+        .post("/pay")
+        .set("user-agent", "capture-int")
+        .set("authorization", "Bearer should-never-leave")
+        .send({
+          password: "hunter2",
+          cardNumber: "4242424242424242",
+          note: "x".repeat(200),
+        })
+        .expect(500);
 
-    expect(encoded.rq).toEqual(failed.request);
-    expect(encoded.e).not.toHaveProperty("request");
-    expect(encoded).not.toHaveProperty("request");
-  });
-});
+      const failed = await waitForSnapshot(
+        collected,
+        (item) => item.operationId === "/pay",
+      );
+
+      expect(failed.request?.headers?.authorization).toBe("[REDACTED]");
+      expect(Buffer.byteLength(failed.request!.body!)).toBeLessThanOrEqual(64);
+      expect(failed.request?.bodyTruncated).toBe(true);
+      const everything = JSON.stringify(failed);
+      expect(everything).not.toContain("hunter2");
+      expect(everything).not.toContain("should-never-leave");
+      expect(everything).not.toContain("4242424242424242");
+    });
+
+    it("puts the capture on the wire as `rq`, beside the error and not inside it", async () => {
+      await request(app.getHttpServer())
+        .post("/pay")
+        .send({ a: 1 })
+        .expect(500);
+
+      const failed = await waitForSnapshot(
+        collected,
+        (item) => item.operationId === "/pay",
+      );
+      const encoded = RequestSnapshotEncoder.encode(failed) as Record<
+        string,
+        any
+      >;
+
+      expect(encoded.rq).toEqual(failed.request);
+      expect(encoded.e).not.toHaveProperty("request");
+      expect(encoded).not.toHaveProperty("request");
+    });
+  },
+);

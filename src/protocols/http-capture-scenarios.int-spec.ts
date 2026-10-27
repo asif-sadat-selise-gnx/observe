@@ -20,6 +20,7 @@ import {
   FastifyAdapter,
   NestFastifyApplication,
 } from "@nestjs/platform-fastify";
+import { NestNodeApplication, NodeAdapter } from "@nestjs/platform-node";
 import request from "supertest";
 import { RequestSnapshotEncoder } from "../encoders/request-snapshot.encoder.js";
 import { ObserveOptions } from "../interfaces/observe-options.interface.js";
@@ -102,7 +103,7 @@ class CheckoutController {
   }
 }
 
-type Platform = "express" | "fastify";
+type Platform = "express" | "fastify" | "node";
 
 /**
  * One application per set of options, on whichever adapter the suite is
@@ -134,6 +135,15 @@ async function bootApp(
     expressApp.useBodyParser("text", { type: "text/plain" });
     expressApp.useBodyParser("raw", { type: "application/octet-stream" });
     app = expressApp;
+  } else if (platform === "node") {
+    const nodeApp = await NestFactory.create<NestNodeApplication>(
+      CaptureScenariosModule as Type<unknown>,
+      new NodeAdapter(),
+      { instrument: ObserveInstrument, logger: false },
+    );
+    nodeApp.useBodyParser("text", { type: "text/plain" });
+    nodeApp.useBodyParser("raw", { type: "application/octet-stream" });
+    app = nodeApp;
   } else {
     const fastifyApp = await NestFactory.create<NestFastifyApplication>(
       CaptureScenariosModule as Type<unknown>,
@@ -164,16 +174,17 @@ async function bootApp(
 }
 
 /**
- * `http.capture`, scenario by scenario, over real HTTP on both adapters.
+ * `http.capture`, scenario by scenario, over real HTTP on every adapter.
  *
  * The capture reads `req.headers` and `req.body` off whatever the adapter
  * hands the response hook - Express's `IncomingMessage` with whatever its
  * parsers left on it, Fastify's request wrapper with whatever its content-type
- * parsers produced. The unit spec covers the function; only a real request
- * shows what each adapter actually leaves there for a string, a buffer, a
- * form, and a body nobody parsed.
+ * parsers produced, the Node adapter's request with what its own parsers left
+ * on it. The unit spec covers the function; only a real request shows what
+ * each adapter actually leaves there for a string, a buffer, a form, and a
+ * body nobody parsed.
  */
-describe.each<Platform>(["express", "fastify"])(
+describe.each<Platform>(["express", "fastify", "node"])(
   "ObserveModule: request capture scenarios (%s)",
   (platform) => {
     describe("with headers, body and a slow threshold configured", () => {
@@ -451,7 +462,7 @@ describe.each<Platform>(["express", "fastify"])(
         expect(accepted.request).toBeUndefined();
       });
 
-      it.runIf(platform === "express")(
+      it.runIf(platform !== "fastify")(
         "records the headers of a multipart request nobody parsed, and none of its parts",
         async () => {
           await request(app.getHttpServer())
@@ -630,7 +641,7 @@ describe.each<Platform>(["express", "fastify"])(
       });
     });
 
-    describe.runIf(platform === "express")(
+    describe.runIf(platform !== "fastify")(
       "behind a function middleware that calls next() synchronously",
       () => {
         let app: INestApplication;
