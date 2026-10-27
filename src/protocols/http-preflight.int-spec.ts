@@ -12,6 +12,7 @@ import {
   FastifyAdapter,
   NestFastifyApplication,
 } from "@nestjs/platform-fastify";
+import { NestNodeApplication, NodeAdapter } from "@nestjs/platform-node";
 import request from "supertest";
 import { ObserveOptions } from "../interfaces/observe-options.interface.js";
 import { createObserveModule } from "../observe.module.js";
@@ -30,9 +31,9 @@ class OrdersController {
   }
 }
 
-type Platform = "express" | "fastify";
+type Platform = "express" | "fastify" | "node";
 
-/** One CORS-enabled application per set of options, on either adapter. */
+/** One CORS-enabled application per set of options, on any adapter. */
 async function bootApp(
   platform: Platform,
   overrides: Partial<ObserveOptions>,
@@ -51,11 +52,17 @@ async function bootApp(
           PreflightModule as Type<unknown>,
           { instrument: ObserveInstrument, logger: false },
         )
-      : await NestFactory.create<NestFastifyApplication>(
-          PreflightModule as Type<unknown>,
-          new FastifyAdapter(),
-          { instrument: ObserveInstrument, logger: false },
-        );
+      : platform === "node"
+        ? await NestFactory.create<NestNodeApplication>(
+            PreflightModule as Type<unknown>,
+            new NodeAdapter(),
+            { instrument: ObserveInstrument, logger: false },
+          )
+        : await NestFactory.create<NestFastifyApplication>(
+            PreflightModule as Type<unknown>,
+            new FastifyAdapter(),
+            { instrument: ObserveInstrument, logger: false },
+          );
   // Ahead of CORS, the way helmet or compression usually are. A preflight
   // with no span is dropped as a request no handler ran for, so without a
   // middleware the agent records as one, there would be nothing to report
@@ -87,7 +94,7 @@ const preflight = (app: INestApplication) =>
     .expect(204);
 
 /**
- * CORS preflights over real HTTP on both adapters.
+ * CORS preflights over real HTTP on every adapter.
  *
  * A preflight is answered by the CORS middleware before any route matches,
  * so a traced one has no route and is reported under its URL - one "route"
@@ -95,7 +102,7 @@ const preflight = (app: INestApplication) =>
  * shows that the request hook sees it at all, and that it is let through
  * untraced unless `http.tracePreflights` asks for it.
  */
-describe.each<Platform>(["express", "fastify"])(
+describe.each<Platform>(["express", "fastify", "node"])(
   "ObserveModule: CORS preflights (%s)",
   (platform) => {
     describe("by default", () => {
