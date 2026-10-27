@@ -14,6 +14,7 @@ import { OperationTraceRegistry } from "../services/operation-trace.registry.js"
 import { KeyOf } from "../types/key-of.type.js";
 import { REQUEST_ID_PATTERN } from "../utils/default-trace-id-generator.util.js";
 import { uuidv7 } from "../utils/uuid-v7.util.js";
+import { deferTraceCompletion } from "./deferred-trace-completion.js";
 
 /** What a queue driver knows about the run it is about to start. */
 export interface JobRunDescriptor {
@@ -306,26 +307,30 @@ export class JobTraceRunner<Store extends Record<string, unknown>> {
           return;
         }
         settled = true;
-        setTimeout(async () => {
-          this.operationTraceRegistry.endTrace(registryKey, { status });
+        deferTraceCompletion(
+          async () => {
+            this.operationTraceRegistry.endTrace(registryKey, { status });
 
-          const snapshot = (await this.operationTraceRegistry.pluckSnapshot(
-            registryKey,
-          )) as JobSnapshot | undefined;
+            const snapshot = (await this.operationTraceRegistry.pluckSnapshot(
+              registryKey,
+            )) as JobSnapshot | undefined;
 
-          // `pluckSnapshot` deletes what it returns, so a trace already
-          // plucked answers undefined, and the encoder would dereference it
-          // inside a `setTimeout`, where no try/catch can reach: an unhandled
-          // TypeError that took the whole process down.
-          //
-          // Dropped rather than reported: there is no snapshot, so there is
-          // nothing to send, and losing one job's self-instrumentation is
-          // not worth a crash loop.
-          if (!snapshot) {
-            return;
-          }
-          this.observeAgentSharedBuffer.insertJobSnapshot(snapshot);
-        }, 0);
+            // `pluckSnapshot` deletes what it returns, so a trace already
+            // plucked answers undefined, and the encoder would dereference it
+            // inside a `setTimeout`, where no try/catch can reach: an
+            // unhandled TypeError that took the whole process down.
+            //
+            // Dropped rather than reported: there is no snapshot, so there is
+            // nothing to send, and losing one job's self-instrumentation is
+            // not worth a crash loop.
+            if (!snapshot) {
+              return;
+            }
+            this.observeAgentSharedBuffer.insertJobSnapshot(snapshot);
+          },
+          this.logger,
+          "job",
+        );
       };
 
       try {

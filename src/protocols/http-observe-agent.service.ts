@@ -22,6 +22,10 @@ import { TraceSamplerService } from "../services/trace-sampler.service.js";
 import { KeyOf } from "../types/key-of.type.js";
 import { redactUrlQuery } from "../utils/redact-url-query.js";
 import { uuidv7 } from "../utils/uuid-v7.util.js";
+import {
+  deferTraceCompletion,
+  getUserIdSafely,
+} from "./deferred-trace-completion.js";
 
 /**
  * How long an aborted request's handler gets to finish its spans before the
@@ -237,34 +241,42 @@ export class HttpObserveAgentService<Store extends Record<string, unknown>>
     if (!traceId) {
       return;
     }
-    setTimeout(async () => {
-      let userId: string | undefined;
-      if (this.options.http?.getUserId) {
-        userId = this.options.http?.getUserId?.(req);
-      }
-      this.operationTraceRegistry.endTrace(traceId, {
-        statusCode: res.statusCode,
-        userId,
-      });
-
-      const snapshot = await this.operationTraceRegistry.pluckSnapshot(traceId);
-      if (!snapshot) {
-        return;
-      }
-      if (shouldCaptureRequest(snapshot, this.options.http?.capture)) {
-        const captured = captureRequest(
-          req,
-          this.options.http?.capture,
-          this.operationTraceRegistry.getRedactor(),
+    deferTraceCompletion(
+      async () => {
+        const userId = getUserIdSafely(
+          this.options.http?.getUserId,
+          [req],
+          this.options.http,
+          this.logger,
+          "http",
         );
-        if (captured) {
-          (snapshot as RequestSnapshot).request = captured;
+        this.operationTraceRegistry.endTrace(traceId, {
+          statusCode: res.statusCode,
+          userId,
+        });
+
+        const snapshot =
+          await this.operationTraceRegistry.pluckSnapshot(traceId);
+        if (!snapshot) {
+          return;
         }
-      }
-      this.observeAgentSharedBuffer.insertRequestSnapshot(
-        snapshot as RequestSnapshot,
-      );
-    }, 0);
+        if (shouldCaptureRequest(snapshot, this.options.http?.capture)) {
+          const captured = captureRequest(
+            req,
+            this.options.http?.capture,
+            this.operationTraceRegistry.getRedactor(),
+          );
+          if (captured) {
+            (snapshot as RequestSnapshot).request = captured;
+          }
+        }
+        this.observeAgentSharedBuffer.insertRequestSnapshot(
+          snapshot as RequestSnapshot,
+        );
+      },
+      this.logger,
+      "http",
+    );
   }
 
   /**

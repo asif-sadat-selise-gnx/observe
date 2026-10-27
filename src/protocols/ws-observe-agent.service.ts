@@ -15,6 +15,10 @@ import {
   loadOptionalPeer,
 } from "../utils/optional-peer.util.js";
 import { uuidv7 } from "../utils/uuid-v7.util.js";
+import {
+  deferTraceCompletion,
+  getUserIdSafely,
+} from "./deferred-trace-completion.js";
 
 type GatewayHandler = (...args: unknown[]) => unknown;
 
@@ -192,19 +196,29 @@ export class WsObserveAgentService<Store extends Record<string, unknown>> {
       });
 
       const endTrace = () => {
-        setTimeout(async () => {
-          this.operationTraceRegistry.endTrace(traceId, {
-            userId: this.options.ws?.getUserId?.(message),
-          });
-          const snapshot =
-            await this.operationTraceRegistry.pluckSnapshot(traceId);
-          if (!snapshot) {
-            return;
-          }
-          this.observeAgentSharedBuffer.insertRequestSnapshot(
-            snapshot as RequestSnapshot,
-          );
-        }, 0);
+        deferTraceCompletion(
+          async () => {
+            this.operationTraceRegistry.endTrace(traceId, {
+              userId: getUserIdSafely(
+                this.options.ws?.getUserId,
+                [message],
+                this.options.ws,
+                this.logger,
+                "ws",
+              ),
+            });
+            const snapshot =
+              await this.operationTraceRegistry.pluckSnapshot(traceId);
+            if (!snapshot) {
+              return;
+            }
+            this.observeAgentSharedBuffer.insertRequestSnapshot(
+              snapshot as RequestSnapshot,
+            );
+          },
+          this.logger,
+          "ws",
+        );
       };
 
       // Nest's ws proxy hands a thrown error to the exception filter and

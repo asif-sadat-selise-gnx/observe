@@ -20,6 +20,10 @@ import {
   describePeerLoadError,
   loadOptionalPeer,
 } from "../utils/optional-peer.util.js";
+import {
+  deferTraceCompletion,
+  getUserIdSafely,
+} from "./deferred-trace-completion.js";
 
 /**
  * The `@nestjs/microservices` surface this agent reads, loaded on demand so
@@ -254,32 +258,43 @@ export class RpcObserveAgentService<Store extends Record<string, unknown>>
     if (!traceId) {
       return;
     }
-    setTimeout(async () => {
-      let userId: string | undefined;
-      if (transportId === this.microservices!.Transport.GRPC) {
-        if (this.options.grpc?.getUserId) {
-          userId = this.options.grpc?.getUserId?.(ctx as GrpcCall);
-        }
-      } else {
-        if (this.options.rpc?.getUserId) {
-          userId = this.options.rpc?.getUserId?.(
-            transportId,
-            ctx as BaseRpcContext,
+    const isGrpc = transportId === this.microservices!.Transport.GRPC;
+    deferTraceCompletion(
+      async () => {
+        let userId: string | undefined;
+        if (isGrpc) {
+          userId = getUserIdSafely(
+            this.options.grpc?.getUserId,
+            [ctx as GrpcCall],
+            this.options.grpc,
+            this.logger,
+            "grpc",
+          );
+        } else {
+          userId = getUserIdSafely(
+            this.options.rpc?.getUserId,
+            [transportId, ctx as BaseRpcContext],
+            this.options.rpc,
+            this.logger,
+            "rpc",
           );
         }
-      }
-      this.operationTraceRegistry.endTrace(traceId, {
-        userId,
-      });
+        this.operationTraceRegistry.endTrace(traceId, {
+          userId,
+        });
 
-      const snapshot = await this.operationTraceRegistry.pluckSnapshot(traceId);
-      if (!snapshot) {
-        return;
-      }
-      this.observeAgentSharedBuffer.insertRequestSnapshot(
-        snapshot as RequestSnapshot,
-      );
-    }, 0);
+        const snapshot =
+          await this.operationTraceRegistry.pluckSnapshot(traceId);
+        if (!snapshot) {
+          return;
+        }
+        this.observeAgentSharedBuffer.insertRequestSnapshot(
+          snapshot as RequestSnapshot,
+        );
+      },
+      this.logger,
+      isGrpc ? "grpc" : "rpc",
+    );
   }
 
   private getOperationIdFromContext(ctx: BaseRpcContext): string {
