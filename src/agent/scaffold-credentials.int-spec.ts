@@ -70,7 +70,7 @@ afterAll(async () => {
   await new Promise<void>((resolve) => collector.close(() => resolve()));
 });
 
-it("points a freshly scaffolded app at the demo and sends nothing", async () => {
+it("points a freshly scaffolded app at link and the demo, and sends nothing", async () => {
   for (let i = 0; i < 5; i++) {
     const res = await fetch(`${baseUrl}/ping`);
     expect(res.status).toBe(200);
@@ -85,6 +85,7 @@ it("points a freshly scaffolded app at the demo and sends nothing", async () => 
     line.includes("not connected yet"),
   );
   expect(notices).toHaveLength(1);
+  expect(notices[0]).toContain("npx @nestjs/observe link");
   expect(notices[0]).toContain("https://www.observe-demo.nestjs.com/dashboard");
 
   // The first start of a new project must not greet anyone with an error.

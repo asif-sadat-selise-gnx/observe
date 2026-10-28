@@ -16,6 +16,10 @@ import {
   detachedWorkerData,
   detachedWorkerSource,
 } from "./detached-observe-worker.assembly.js";
+import {
+  readSdkVersion,
+  UNKNOWN_SDK_VERSION,
+} from "../utils/sdk-version.util.js";
 
 /** A shared buffer holding one batch, laid out as the agent lays it out. */
 const bufferWithBatch = (json: string) => {
@@ -276,4 +280,19 @@ describe("what the detached worker makes of an accepted batch's reply", () => {
     },
     20_000,
   );
+
+  it("names its own release on every batch", async () => {
+    let received: IncomingMessage["headers"] | undefined;
+    respond = (req, res) => {
+      received = req.headers;
+      acceptWith({ degraded: false })(req, res);
+    };
+
+    await verdictFor(endpoint, { appKey: "k", appSecret: "s" });
+
+    // What the collector stores per application, so an app still running
+    // an old release can be told a newer one exists.
+    expect(received?.["x-observe-sdk-version"]).toBe(readSdkVersion());
+    expect(received?.["x-observe-sdk-version"]).not.toBe(UNKNOWN_SDK_VERSION);
+  }, 20_000);
 });

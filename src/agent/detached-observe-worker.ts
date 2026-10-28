@@ -25,6 +25,11 @@ export interface DetachedWorkerConfig {
   degradedPrefix: string;
   /** `PAUSED_MESSAGE_PREFIX`, as data, for the same reason. */
   pausedPrefix: string;
+  /**
+   * This package's version (`readSdkVersion`), read on the main thread: the
+   * worker runs as eval'd source and cannot resolve a manifest of its own.
+   */
+  sdkVersion: string;
 }
 
 export interface DetachedWorkerData {
@@ -110,6 +115,9 @@ export const detachedObserveWorker = (
     // config key would put a broken header on every batch. The value is
     // pinned by worker-degraded-reply.spec.ts.
     "x-observe-ingest-modes": "reduced, trimmed, paced, errors-only",
+    // Which agent sent the batch, so the collector can tell an application
+    // still on an old release that a newer one exists.
+    "x-observe-sdk-version": config.sdkVersion,
   };
   // Omitted rather than sent empty when unconfigured: a collector in
   // placeholder mode accepts an unauthenticated batch, and blank credentials

@@ -233,7 +233,7 @@ describe("ObserveAgentWorker options", () => {
       };
     };
 
-    it("points at the demo and sign-up instead of starting the worker", () => {
+    it("points at link and the demo instead of starting the worker", () => {
       build(scaffold);
       const { log, error } = spyLogger();
       worker.onModuleInit();
@@ -244,8 +244,10 @@ describe("ObserveAgentWorker options", () => {
           "https://www.observe-demo.nestjs.com/dashboard",
         ),
       );
+      // Link signs the developer up if they have no account, so the one
+      // command replaces the old "create a free account" pointer.
       expect(log).toHaveBeenCalledWith(
-        expect.stringContaining("https://observe.nestjs.com"),
+        expect.stringContaining("npx @nestjs/observe link"),
       );
       expect(error).not.toHaveBeenCalled();
     });

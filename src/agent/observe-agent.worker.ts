@@ -30,6 +30,10 @@ import {
   detachedWorkerData,
   detachedWorkerSource,
 } from "./detached-observe-worker.assembly.js";
+import {
+  describeMissingCredentials,
+  SIGN_UP_URL,
+} from "./credentials-notice.js";
 import { ObserveAgentSharedBuffer } from "./observe-agent.shared-buffer.js";
 
 const DEFAULT_RUNTIME_METRICS_INTERVAL = 60000; // 60 seconds
@@ -91,8 +95,6 @@ const MIN_FINAL_RUNTIME_WINDOW_MS = 10_000;
 const SCAFFOLD_APP_KEY = "YOUR_APP_KEY";
 const SCAFFOLD_APP_SECRET = "YOUR_APP_SECRET";
 
-const DEMO_URL = "https://www.observe-demo.nestjs.com/dashboard";
-const SIGN_UP_URL = "https://observe.nestjs.com";
 const DASHBOARD_URL = `${SIGN_UP_URL}/dashboard`;
 
 @Injectable()
@@ -158,27 +160,25 @@ export class ObserveAgentWorker implements OnModuleInit, OnApplicationShutdown {
       this.logger.log(
         "Observe is disabled (enabled: false): nothing is recorded or sent.",
       );
-    } else if (this.hasScaffoldCredentials) {
+    } else if (this.hasScaffoldCredentials || this.lacksHostedCredentials) {
       // Nothing is sent, so there is no worker to start. The flush timer below
       // still runs and empties the buffer, which the instrumentation keeps
       // writing into either way.
-      this.logger.log(
-        `Observe is installed but not connected yet: appKey and appSecret are still the placeholders from nest new, so no telemetry is sent. ` +
-          `See what this app will look like: ${DEMO_URL} - then create a free account at ${SIGN_UP_URL} for your own key and secret.`,
-      );
-    } else if (this.lacksHostedCredentials) {
-      // The same arrangement, said as a warning: this is a deployment missing
-      // its configuration, not a project fresh from the generator.
-      const unset =
-        !this.options.appKey && !this.options.appSecret
-          ? "appKey and appSecret are"
-          : !this.options.appKey
-            ? "appKey is"
-            : "appSecret is";
-      this.logger.warn(
-        `Observe is installed but sends nothing: ${unset} not set, and the hosted collector accepts no telemetry without a key and a secret. ` +
-          `If they come from the environment, check that both variables reach this process, then restart it. Create a key and secret at ${SIGN_UP_URL}.`,
-      );
+      const notice = describeMissingCredentials({
+        scaffold: this.hasScaffoldCredentials,
+        unset:
+          !this.options.appKey && !this.options.appSecret
+            ? "both"
+            : !this.options.appKey
+              ? "appKey"
+              : "appSecret",
+        production: process.env.NODE_ENV === "production",
+      });
+      if (notice.level === "warn") {
+        this.logger.warn(notice.message);
+      } else {
+        this.logger.log(notice.message);
+      }
     } else {
       this.initializeWorker();
     }
