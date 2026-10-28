@@ -14,7 +14,11 @@ import { OperationTraceRegistry } from "../services/operation-trace.registry.js"
 import { KeyOf } from "../types/key-of.type.js";
 import { REQUEST_ID_PATTERN } from "../utils/default-trace-id-generator.util.js";
 import { uuidv7 } from "../utils/uuid-v7.util.js";
-import { deferTraceCompletion } from "./deferred-trace-completion.js";
+import {
+  deferTraceCompletion,
+  setAttributesSafely,
+  shouldIgnoreSafely,
+} from "./deferred-trace-completion.js";
 
 /** What a queue driver knows about the run it is about to start. */
 export interface JobRunDescriptor {
@@ -196,9 +200,9 @@ export class JobTraceRunner<Store extends Record<string, unknown>> {
   }
 
   /**
-   * Whether `jobs.ignore` matches this run. A predicate that throws is
-   * reported and read as "trace it": a bug in tracing configuration must not
-   * stop the job itself from running.
+   * Whether `jobs.ignore` matches this run. A predicate that throws is read
+   * as a match, as every other protocol reads its own: the job still runs,
+   * just without a trace.
    */
   private isIgnored(context: JobContext): boolean {
     // Jobs never reach the sampler, which is where every other protocol
@@ -206,14 +210,13 @@ export class JobTraceRunner<Store extends Record<string, unknown>> {
     if (this.options.enabled === false) {
       return true;
     }
-    try {
-      return Boolean(this.options.jobs?.ignore?.(context));
-    } catch (error) {
-      this.logger.warn(
-        `"jobs.ignore" threw for job "${context.name}" (queue "${context.queueName}"); tracing it anyway: ${error instanceof Error ? error.message : String(error)}`,
-      );
-      return false;
-    }
+    return shouldIgnoreSafely(
+      this.options.jobs?.ignore,
+      [context],
+      this.options.jobs,
+      this.logger,
+      "jobs",
+    );
   }
 
   /**
@@ -277,12 +280,14 @@ export class JobTraceRunner<Store extends Record<string, unknown>> {
         id: typeof job.id === "number" ? `${job.id}` : job.id,
       };
 
-      const attributes = this.options.jobs?.setAttributes?.(context);
-      if (attributes) {
-        for (const [key, value] of Object.entries(attributes)) {
-          store.set(key, value);
-        }
-      }
+      setAttributesSafely(
+        this.options.jobs?.setAttributes,
+        [context],
+        this.options.jobs,
+        store,
+        this.logger,
+        "jobs",
+      );
 
       if (this.isIgnored(context)) {
         // The trace id stays in the store so logs and jobs enqueued from here

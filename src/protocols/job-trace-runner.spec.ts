@@ -103,7 +103,7 @@ describe("JobTraceRunner: jobs.ignore", () => {
     expect(done).toHaveBeenCalledOnce();
   });
 
-  it("still runs, and traces, a job whose predicate throws", () => {
+  it("still runs, without a trace, a job whose predicate throws", () => {
     const runner = createRunner({
       ignore: () => {
         throw new Error("bad predicate");
@@ -112,7 +112,8 @@ describe("JobTraceRunner: jobs.ignore", () => {
 
     const seen = runner.run(job, () => observeRun());
 
-    expect(seen.traced).toBe(true);
+    expect(seen.traceId).toEqual(expect.any(String));
+    expect(seen.traced).toBe(false);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("bad predicate"));
   });
 

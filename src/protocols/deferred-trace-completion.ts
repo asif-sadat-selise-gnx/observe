@@ -1,4 +1,5 @@
 import type { Logger } from "@nestjs/common";
+import { uuidv7 } from "../utils/uuid-v7.util.js";
 
 const reportedCallbacks = new WeakSet<Function>();
 const reportedDeferredFailures = new WeakSet<object>();
@@ -15,8 +16,120 @@ function warnSafely(logger: Logger, message: string): void {
   try {
     logger.warn(message);
   } catch {
-    // Diagnostics must not become another failure in deferred telemetry.
+    // Diagnostics must not become another failure in the operation traced -
+    // or in its deferred telemetry.
   }
+}
+
+/**
+ * Runs a callback from the module options, answering `fallback()` when it
+ * throws. These callbacks only shape what is recorded, so a bug in one must
+ * not fail the request, message or job being recorded - or, thrown from a
+ * timer, end the process. The first failure of each callback is reported
+ * with its error and `outcome`, what was given up for it; later ones are not.
+ */
+export function invokeUserCallbackSafely<
+  TArgs extends unknown[],
+  TResult,
+  TFallback,
+>(
+  callback: (...args: TArgs) => TResult,
+  args: TArgs,
+  receiver: unknown,
+  fallback: () => TFallback,
+  logger: Logger,
+  name: string,
+  outcome: string,
+): TResult | TFallback {
+  try {
+    return callback.apply(receiver, args);
+  } catch (error) {
+    if (!reportedCallbacks.has(callback)) {
+      reportedCallbacks.add(callback);
+      warnSafely(
+        logger,
+        `"${name}" threw; ${outcome}. Later failures are not reported: ${describeFailure(error)}`,
+      );
+    }
+    return fallback();
+  }
+}
+
+/**
+ * The trace id for an operation. A generator that throws is replaced by a
+ * fresh uuidv7, which no open trace can share, so the operation is still
+ * traced under a registry key of its own.
+ */
+export function generateTraceIdSafely(
+  generator: (context: unknown) => string,
+  context: unknown,
+  receiver: unknown,
+  logger: Logger,
+): string {
+  return invokeUserCallbackSafely(
+    generator,
+    [context],
+    receiver,
+    uuidv7,
+    logger,
+    "traceIdGenerator",
+    "using a random trace id",
+  );
+}
+
+/** Copies an operation's `setAttributes` into its store, unless it throws. */
+export function setAttributesSafely<TArgs extends unknown[]>(
+  callback: ((...args: TArgs) => Record<string, unknown>) | undefined,
+  args: TArgs,
+  receiver: unknown,
+  store: Map<any, unknown>,
+  logger: Logger,
+  transport: string,
+): void {
+  if (!callback) {
+    return;
+  }
+  const attributes = invokeUserCallbackSafely(
+    callback,
+    args,
+    receiver,
+    () => undefined,
+    logger,
+    `${transport}.setAttributes`,
+    "continuing without its attributes",
+  );
+  if (!attributes) {
+    return;
+  }
+  for (const [key, value] of Object.entries(attributes)) {
+    store.set(key, value);
+  }
+}
+
+/**
+ * Whether `ignore` excludes an operation. One that throws excludes it as
+ * well: the operation still runs, but recording what a broken predicate may
+ * have been written to keep out is not a safe guess.
+ */
+export function shouldIgnoreSafely<TArgs extends unknown[]>(
+  callback: ((...args: TArgs) => boolean) | undefined,
+  args: TArgs,
+  receiver: unknown,
+  logger: Logger,
+  transport: string,
+): boolean {
+  if (!callback) {
+    return false;
+  }
+  return invokeUserCallbackSafely(
+    callback,
+    args,
+    receiver,
+    () => true,
+    logger,
+    `${transport}.ignore`,
+    "not tracing the operation",
+  );
 }
 
 /** A bad identity callback must not prevent the trace from being closed. */
@@ -30,18 +143,15 @@ export function getUserIdSafely<TArgs extends unknown[]>(
   if (!callback) {
     return undefined;
   }
-  try {
-    return callback.apply(receiver, args);
-  } catch (error) {
-    if (!reportedCallbacks.has(callback)) {
-      reportedCallbacks.add(callback);
-      warnSafely(
-        logger,
-        `"${transport}.getUserId" threw; completing the trace without a user id. Later failures are not reported: ${describeFailure(error)}`,
-      );
-    }
-    return undefined;
-  }
+  return invokeUserCallbackSafely(
+    callback,
+    args,
+    receiver,
+    () => undefined,
+    logger,
+    `${transport}.getUserId`,
+    "completing the trace without a user id",
+  );
 }
 
 /** Run deferred completion without ever leaking a rejection from its timer. */

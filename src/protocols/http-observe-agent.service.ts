@@ -24,7 +24,10 @@ import { redactUrlQuery } from "../utils/redact-url-query.js";
 import { uuidv7 } from "../utils/uuid-v7.util.js";
 import {
   deferTraceCompletion,
+  generateTraceIdSafely,
   getUserIdSafely,
+  setAttributesSafely,
+  shouldIgnoreSafely,
 } from "./deferred-trace-completion.js";
 
 /**
@@ -158,17 +161,22 @@ export class HttpObserveAgentService<Store extends Record<string, unknown>>
     // identical object, one lookup fewer, and it is known to exist.
     const store = new Map<KeyOf<Store>, any>();
     this.asyncLocalStorage.run(store, () => {
-      const traceId = this.options.traceIdGenerator(req);
+      const traceId = generateTraceIdSafely(
+        this.options.traceIdGenerator,
+        req,
+        this.options,
+        this.logger,
+      );
       store.set(this.options.traceIdKey, traceId);
 
-      if (this.options.http?.setAttributes) {
-        const attributes = this.options.http?.setAttributes?.(req);
-        if (attributes) {
-          for (const [key, value] of Object.entries(attributes)) {
-            store.set(key, value);
-          }
-        }
-      }
+      setAttributesSafely(
+        this.options.http?.setAttributes,
+        [req],
+        this.options.http,
+        store,
+        this.logger,
+        "http",
+      );
 
       // A request that is not recorded still carries its trace id, which an
       // adopted `x-request-id` can share with a recorded request. A registry
@@ -358,7 +366,13 @@ export class HttpObserveAgentService<Store extends Record<string, unknown>>
 
   private shouldIgnoreRequest(req: { url: string; method: string }): boolean {
     if (typeof this.options.http?.ignore === "function") {
-      return this.options.http.ignore(req);
+      return shouldIgnoreSafely(
+        this.options.http.ignore,
+        [req],
+        this.options.http,
+        this.logger,
+        "http",
+      );
     }
     if (Array.isArray(this.options.http?.ignore)) {
       const blocklist = this.options.http.ignore;

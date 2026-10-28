@@ -18,6 +18,8 @@ import { uuidv7 } from "../utils/uuid-v7.util.js";
 import {
   deferTraceCompletion,
   getUserIdSafely,
+  setAttributesSafely,
+  shouldIgnoreSafely,
 } from "./deferred-trace-completion.js";
 
 type GatewayHandler = (...args: unknown[]) => unknown;
@@ -172,15 +174,23 @@ export class WsObserveAgentService<Store extends Record<string, unknown>> {
       const traceId = uuidv7();
       store.set(this.options.traceIdKey, traceId);
 
-      const attributes = this.options.ws?.setAttributes?.(message);
-      if (attributes) {
-        for (const [key, value] of Object.entries(attributes)) {
-          store.set(key, value);
-        }
-      }
+      setAttributesSafely(
+        this.options.ws?.setAttributes,
+        [message],
+        this.options.ws,
+        store,
+        this.logger,
+        "ws",
+      );
 
       if (
-        this.options.ws?.ignore?.(message) ||
+        shouldIgnoreSafely(
+          this.options.ws?.ignore,
+          [message],
+          this.options.ws,
+          this.logger,
+          "ws",
+        ) ||
         !this.traceSamplerService.shouldCapture("ws", {
           gateway: message.gateway,
           pattern: message.pattern,

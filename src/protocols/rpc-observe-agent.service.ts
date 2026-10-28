@@ -22,7 +22,10 @@ import {
 } from "../utils/optional-peer.util.js";
 import {
   deferTraceCompletion,
+  generateTraceIdSafely,
   getUserIdSafely,
+  setAttributesSafely,
+  shouldIgnoreSafely,
 } from "./deferred-trace-completion.js";
 
 /**
@@ -171,19 +174,32 @@ export class RpcObserveAgentService<Store extends Record<string, unknown>>
     // identical object, one lookup fewer, and it is known to exist.
     const store = new Map<KeyOf<Store>, any>();
     return this.asyncLocalStorage.run(store, () => {
-      const traceId = this.options.traceIdGenerator(ctx);
+      const traceId = generateTraceIdSafely(
+        this.options.traceIdGenerator,
+        ctx,
+        this.options,
+        this.logger,
+      );
       store.set(this.options.traceIdKey, traceId);
 
-      if (this.options.rpc?.setAttributes) {
-        const attributes = this.options.rpc?.setAttributes?.(transportId, ctx);
-        if (attributes) {
-          for (const [key, value] of Object.entries(attributes)) {
-            store.set(key, value);
-          }
-        }
-      }
+      setAttributesSafely(
+        this.options.rpc?.setAttributes,
+        [transportId, ctx],
+        this.options.rpc,
+        store,
+        this.logger,
+        "rpc",
+      );
 
-      if (this.options.rpc?.ignore?.(transportId, ctx)) {
+      if (
+        shouldIgnoreSafely(
+          this.options.rpc?.ignore,
+          [transportId, ctx],
+          this.options.rpc,
+          this.logger,
+          "rpc",
+        )
+      ) {
         return done();
       }
 
@@ -211,21 +227,36 @@ export class RpcObserveAgentService<Store extends Record<string, unknown>>
     // As above: the map `run` is given, not looked back up.
     const store = new Map<KeyOf<Store>, any>();
     return this.asyncLocalStorage.run(store, () => {
-      const traceId = this.options.traceIdGenerator(call);
+      const traceId = generateTraceIdSafely(
+        this.options.traceIdGenerator,
+        call,
+        this.options,
+        this.logger,
+      );
       store.set(this.options.traceIdKey, traceId);
 
-      if (this.options.grpc?.setAttributes) {
-        const attributes = this.options.grpc?.setAttributes?.(call);
-        if (attributes) {
-          for (const [key, value] of Object.entries(attributes)) {
-            store.set(key, value);
-          }
-        }
-      }
+      setAttributesSafely(
+        this.options.grpc?.setAttributes,
+        [call],
+        this.options.grpc,
+        store,
+        this.logger,
+        "grpc",
+      );
 
       return new Promise<unknown>((resolve) => {
+        // A throw in this timer escapes the promise: `done()` never runs, and
+        // the exception is uncaught. Both decisions below are guarded.
         setTimeout(() => {
-          if (this.options.grpc?.ignore?.(call)) {
+          if (
+            shouldIgnoreSafely(
+              this.options.grpc?.ignore,
+              [call],
+              this.options.grpc,
+              this.logger,
+              "grpc",
+            )
+          ) {
             return resolve(done());
           }
 

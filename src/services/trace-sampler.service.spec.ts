@@ -1,3 +1,4 @@
+import { Logger } from "@nestjs/common";
 import { ObserveModuleOptionsWithDefaults } from "../interfaces/observe-options.interface.js";
 import { TraceSamplerService } from "./trace-sampler.service.js";
 
@@ -95,6 +96,26 @@ describe("TraceSamplerService", () => {
       expect(
         service.shouldCapture("http", { url: "/health", method: "GET" }),
       ).toBe(false);
+    });
+
+    it("captures nothing from a callback that throws, and says so once", () => {
+      // Every transport asks the sampler, gRPC from inside a timer, where a
+      // throw used to end the process.
+      const warn = vi
+        .spyOn(Logger.prototype, "warn")
+        .mockImplementation(() => undefined);
+      const service = sampler(() => {
+        throw new Error("no such attribute");
+      });
+
+      expect(service.shouldCapture("http", httpAttributes)).toBe(false);
+      expect(service.shouldCapture("grpc", { call: {} })).toBe(false);
+
+      expect(warn).toHaveBeenCalledOnce();
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("no such attribute"),
+      );
+      warn.mockRestore();
     });
   });
 
