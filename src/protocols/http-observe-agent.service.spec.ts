@@ -274,4 +274,49 @@ describe("HttpObserveAgentService", () => {
       },
     );
   });
+
+  describe("stateful regex request ignores", () => {
+    it.each([
+      ["global direct regex", "g", false],
+      ["sticky direct regex", "y", false],
+      ["global method-scoped regex", "g", true],
+      ["sticky method-scoped regex", "y", true],
+    ] as const)(
+      "always matches with a %s and preserves the configured lastIndex",
+      (_name, flags, methodScoped) => {
+        const pattern = new RegExp("^/health$", flags);
+        pattern.lastIndex = 2;
+        const ignore = methodScoped
+          ? [{ method: "GET", path: pattern }]
+          : [pattern];
+        const service = createService({ ignore: ignore as never });
+        const shouldIgnore = (
+          service as unknown as {
+            shouldIgnoreRequest: (req: { url: string; method: string }) => boolean;
+          }
+        ).shouldIgnoreRequest.bind(service);
+
+        const decisions = Array.from({ length: 6 }, () =>
+          shouldIgnore({ url: "/health", method: "GET" }),
+        );
+
+        expect(decisions).toEqual([true, true, true, true, true, true]);
+        expect(pattern.lastIndex).toBe(2);
+      },
+    );
+
+    it("keeps an ordinary regex on the direct test path", () => {
+      const pattern = /^\/health$/;
+      const test = vi.spyOn(pattern, "test");
+      const service = createService({ ignore: [pattern] });
+      const shouldIgnore = (
+        service as unknown as {
+          shouldIgnoreRequest: (req: { url: string; method: string }) => boolean;
+        }
+      ).shouldIgnoreRequest.bind(service);
+
+      expect(shouldIgnore({ url: "/health", method: "GET" })).toBe(true);
+      expect(test).toHaveBeenCalledTimes(1);
+    });
+  });
 });

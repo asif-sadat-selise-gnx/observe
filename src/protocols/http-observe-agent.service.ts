@@ -367,14 +367,14 @@ export class HttpObserveAgentService<Store extends Record<string, unknown>>
           return req.url === item;
         }
         if (item instanceof RegExp) {
-          return item.test(req.url);
+          return testIgnoreRegex(item, req.url);
         }
         if (typeof item === "object") {
           return (
             item.method === req.method &&
             (typeof item.path === "string"
               ? req.url === item.path
-              : item.path.test(req.url))
+              : testIgnoreRegex(item.path, req.url))
           );
         }
 
@@ -383,6 +383,19 @@ export class HttpObserveAgentService<Store extends Record<string, unknown>>
     }
     return false;
   }
+}
+
+/**
+ * Global and sticky regular expressions carry a lastIndex between calls. Use
+ * a fresh expression for each ignore decision so matching always starts at the
+ * beginning without changing the user's regex state. Ordinary expressions
+ * are stateless here and can be tested directly.
+ */
+function testIgnoreRegex(pattern: RegExp, value: string): boolean {
+  if (!pattern.global && !pattern.sticky) {
+    return pattern.test(value);
+  }
+  return new RegExp(pattern.source, pattern.flags).test(value);
 }
 
 /**
