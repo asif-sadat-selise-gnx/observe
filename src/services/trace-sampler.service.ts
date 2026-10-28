@@ -1,9 +1,12 @@
-import { Inject, Injectable } from "@nestjs/common";
+import { Inject, Injectable, Logger } from "@nestjs/common";
 import { ObserveModuleOptionsWithDefaults } from "../interfaces/observe-options.interface.js";
 import { OBSERVE_OPTIONS } from "../observe.constants.js";
+import { invokeUserCallbackSafely } from "../protocols/deferred-trace-completion.js";
 
 @Injectable()
 export class TraceSamplerService {
+  private readonly logger = new Logger(TraceSamplerService.name);
+
   constructor(
     @Inject(OBSERVE_OPTIONS)
     private readonly options: ObserveModuleOptionsWithDefaults,
@@ -65,6 +68,17 @@ export class TraceSamplerService {
       return Math.random() < this.options.tracesSampleRate; // Randomly capture traces based on sample rate
     }
 
-    return this.options.tracesSampleRate(protocol, attributes);
+    // Guarded here rather than at each call site, since every transport asks.
+    // A callback that throws keeps the operation out, as a throwing `ignore`
+    // does.
+    return invokeUserCallbackSafely(
+      this.options.tracesSampleRate,
+      [protocol, attributes],
+      this.options,
+      () => false,
+      this.logger,
+      "tracesSampleRate",
+      "not tracing the operation",
+    );
   }
 }

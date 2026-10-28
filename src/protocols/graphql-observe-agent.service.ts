@@ -21,7 +21,10 @@ import {
 } from "./graphql-operation-parser.js";
 import {
   deferTraceCompletion,
+  generateTraceIdSafely,
   getUserIdSafely,
+  setAttributesSafely,
+  shouldIgnoreSafely,
 } from "./deferred-trace-completion.js";
 
 /**
@@ -239,7 +242,15 @@ export class GraphQLObserveAgentService<Store extends Record<string, unknown>>
       operationName,
     });
 
-    if (this.options.graphql?.ignore?.(info)) {
+    if (
+      shouldIgnoreSafely(
+        this.options.graphql?.ignore,
+        [info],
+        this.options.graphql,
+        this.logger,
+        "graphql",
+      )
+    ) {
       return undefined;
     }
 
@@ -375,7 +386,12 @@ export class GraphQLObserveAgentService<Store extends Record<string, unknown>>
       return undefined;
     }
 
-    const traceId = this.options.traceIdGenerator(info);
+    const traceId = generateTraceIdSafely(
+      this.options.traceIdGenerator,
+      info,
+      this.options,
+      this.logger,
+    );
     const store = new Map<KeyOf<Store>, any>();
     store.set(this.options.traceIdKey, traceId);
     this.asyncLocalStorage.enterWith(store);
@@ -574,12 +590,13 @@ export class GraphQLObserveAgentService<Store extends Record<string, unknown>>
     if (!store) {
       return;
     }
-    const attributes = this.options.graphql.setAttributes(info, context);
-    if (!attributes) {
-      return;
-    }
-    for (const [key, value] of Object.entries(attributes)) {
-      store.set(key, value);
-    }
+    setAttributesSafely(
+      this.options.graphql.setAttributes,
+      [info, context],
+      this.options.graphql,
+      store,
+      this.logger,
+      "graphql",
+    );
   }
 }
