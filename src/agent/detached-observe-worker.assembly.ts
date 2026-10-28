@@ -12,6 +12,7 @@ import {
   SECTION_SHAPES,
 } from "./telemetry-wire-contract.js";
 import { describeIngestRefusal } from "../utils/ingest-refusal.util.js";
+import { readSdkVersion } from "../utils/sdk-version.util.js";
 
 /**
  * How the telemetry worker is put together, in one place.
@@ -44,6 +45,7 @@ export function detachedWorkerData(input: {
     wireShapes: SECTION_SHAPES,
     degradedPrefix: DEGRADED_MESSAGE_PREFIX,
     pausedPrefix: PAUSED_MESSAGE_PREFIX,
+    sdkVersion: readSdkVersion(),
   };
   return { sharedBuffer: input.sharedBuffer, config };
 }
