@@ -1,6 +1,7 @@
 import { subscribe, unsubscribe } from "diagnostics_channel";
 import { LogRedactor } from "../utils/log-redactor.js";
 import { redactUrlQuery } from "../utils/redact-url-query.js";
+import { attachLlmSpan } from "./llm/llm-fetch.integration.js";
 import {
   OpenOutgoingSpan,
   OutgoingSpanRecorder,
@@ -99,6 +100,9 @@ export function subscribeOutgoingHttp(
     });
     if (span) {
       spans.set(request, span);
+      // A no-op unless this request is a model call the fetch observer is
+      // reading - see `llm-fetch.integration.ts`.
+      attachLlmSpan(span);
     }
     return true;
   };

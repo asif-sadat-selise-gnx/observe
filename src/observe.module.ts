@@ -29,6 +29,7 @@ import { CALLER_METADATA_KEY, OBSERVE_OPTIONS } from "./observe.constants.js";
 import { GraphQLObserveAgentService } from "./protocols/graphql-observe-agent.service.js";
 import { HttpObserveAgentService } from "./protocols/http-observe-agent.service.js";
 import { OutgoingObserveAgentService } from "./outgoing/outgoing-observe-agent.service.js";
+import { installLlmFetchObserver } from "./outgoing/llm/llm-fetch.integration.js";
 import { BullObserveAgentService } from "./protocols/bull-observe-agent.service.js";
 import { QueueObserveAgentService } from "./protocols/queue-observe-agent.service.js";
 import { RpcObserveAgentService } from "./protocols/rpc-observe-agent.service.js";
@@ -171,6 +172,9 @@ export function createObserveModule<Store extends Record<string, unknown>>(
   options.attachTraceIdToLogs ??= true;
   options.traceIdGenerator ??= defaultTraceIdGenerator;
   options.skipInstrumentation ??= () => false;
+
+  // Inert until the agent starts with `outgoing.llm` on - see the function.
+  installLlmFetchObserver();
 
   const asyncLocalStorage = new AsyncLocalStorage<Map<KeyOf<Store>, unknown>>();
   const operationTraceRegistry = new OperationTraceRegistry(
