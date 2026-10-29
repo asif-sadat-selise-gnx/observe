@@ -33,6 +33,8 @@ type AnyFunction = (...args: any[]) => any;
  * Matched by shape as well as by class: an application with a second copy of
  * `@nestjs/core` in its tree has a second `Reflector` class, which the
  * `instanceof` alone would miss.
+ *
+ * A `MongoClient` or `Db` registered as a provider is the other.
  */
 function isFrameworkNoise(instance: object): boolean {
   if (instance instanceof Reflector) {
@@ -43,9 +45,51 @@ function isFrameworkNoise(instance: object): boolean {
     getAllAndOverride?: unknown;
   };
   return (
-    candidate.constructor?.name === "Reflector" &&
-    typeof candidate.getAllAndOverride === "function"
+    (candidate.constructor?.name === "Reflector" &&
+      typeof candidate.getAllAndOverride === "function") ||
+    isMongoDriverHandle(instance)
   );
+}
+
+/**
+ * Whether an instance is the `mongodb` driver's `MongoClient` or `Db`.
+ *
+ * Instrumenting them breaks the driver, not just the waterfall. Traced calls
+ * run with the proxy as receiver and untraced ones with the raw instance, so
+ * what a method keeps of `this` depends on whether a trace was active: a `Db`
+ * made at bootstrap holds the raw client, a session started in a traced
+ * request holds the proxy, and the driver's `session.client !== client` check
+ * throws "ClientSession must be from the same MongoClient" - for every
+ * explicit session, transaction and `withSession` on a traced request, while
+ * the same calls on a sampled-out one succeed. The command spans the mongodb
+ * integration records are the useful part anyway; `Db.collection` and
+ * `MongoClient.startSession` spans are not.
+ *
+ * Matched by name and shape only: the driver is an optional peer, never
+ * imported here, and an application may carry more than one copy of it.
+ */
+function isMongoDriverHandle(instance: object): boolean {
+  const candidate = instance as {
+    constructor?: { name?: unknown };
+    startSession?: unknown;
+    db?: unknown;
+    collection?: unknown;
+    databaseName?: unknown;
+  };
+  switch (candidate.constructor?.name) {
+    case "MongoClient":
+      return (
+        typeof candidate.startSession === "function" &&
+        typeof candidate.db === "function"
+      );
+    case "Db":
+      return (
+        typeof candidate.collection === "function" &&
+        typeof candidate.databaseName === "string"
+      );
+    default:
+      return false;
+  }
 }
 
 interface TracedCallSpec {
