@@ -1,6 +1,7 @@
 import { Reflector } from "@nestjs/core";
 import { AsyncLocalStorage } from "async_hooks";
 import { EventEmitter } from "events";
+import { MongoClient } from "mongodb";
 import { OperationTraceRegistry } from "../services/operation-trace.registry.js";
 import { createInstanceDecorator } from "./create-instance-decorator.instrument.js";
 
@@ -474,6 +475,65 @@ describe("createInstanceDecorator", () => {
       withTrace(() => own.reflect());
       expect(startedSteps).toEqual([
         { className: "Reflector", methodName: "reflect" },
+      ]);
+    });
+
+    it("never instruments the mongodb driver's MongoClient and Db", async () => {
+      // Never connected: constructing either one opens no socket.
+      const client = new MongoClient("mongodb://127.0.0.1:1");
+      const db = client.db("app");
+      expect(decorate(client)).toBe(client);
+      expect(decorate(db)).toBe(db);
+
+      // A second copy of the driver has its own classes; the shape still
+      // gives them away.
+      class MongoClient2 {
+        startSession() {
+          return {};
+        }
+        db() {
+          return {};
+        }
+      }
+      Object.defineProperty(MongoClient2, "name", { value: "MongoClient" });
+      class Db2 {
+        readonly databaseName = "app";
+        collection() {
+          return {};
+        }
+      }
+      Object.defineProperty(Db2, "name", { value: "Db" });
+      const clientCopy = new MongoClient2();
+      const dbCopy = new Db2();
+      expect(decorate(clientCopy)).toBe(clientCopy);
+      expect(decorate(dbCopy)).toBe(dbCopy);
+
+      await client.close();
+    });
+
+    it("still instruments a provider that is only called MongoClient or Db", () => {
+      class MongoClient2 {
+        connect() {
+          return "connected";
+        }
+      }
+      Object.defineProperty(MongoClient2, "name", { value: "MongoClient" });
+      class Db2 {
+        collection() {
+          return "items";
+        }
+      }
+      Object.defineProperty(Db2, "name", { value: "Db" });
+      const client = decorate(new MongoClient2()) as MongoClient2;
+      const db = decorate(new Db2()) as Db2;
+
+      withTrace(() => {
+        client.connect();
+        db.collection();
+      });
+      expect(startedSteps).toEqual([
+        { className: "MongoClient", methodName: "connect" },
+        { className: "Db", methodName: "collection" },
       ]);
     });
 

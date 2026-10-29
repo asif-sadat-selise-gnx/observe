@@ -93,7 +93,9 @@ export interface CreateObserveModuleOptions {
    *
    * Nest's own `Reflector` is never instrumented, whatever this returns: its
    * metadata lookups run several times a request and say nothing a
-   * waterfall is for.
+   * waterfall is for. Nor are the `mongodb` driver's `MongoClient` and
+   * `Db`: their command spans come from the mongodb integration, and a
+   * proxied client fails the driver's session identity checks.
    *
    * Runs before the built-in checks, so it also shields providers that
    * cannot even be inspected safely: some libraries (nestjs-cls proxy
