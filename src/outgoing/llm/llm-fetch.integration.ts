@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "async_hooks";
+import type { ObserveOptions } from "../../interfaces/observe-options.interface.js";
 import {
   OpenOutgoingSpan,
   OutgoingSpanRecorder,
@@ -62,6 +63,19 @@ const INSTALLED = Symbol.for("@nestjs/observe:llm-fetch");
 
 let active: LlmObserverConfig | undefined;
 
+/** The wrapper this copy of the module put in place, and what it wraps. */
+let installed: { wrapper: typeof fetch; original: typeof fetch } | undefined;
+
+/**
+ * Whether an `outgoing` option turns model calls off. They are read off the
+ * HTTP spans, so turning those off turns model calls off with them.
+ */
+export function llmCallsOff(outgoing: ObserveOptions["outgoing"]): boolean {
+  return (
+    outgoing === false || outgoing?.http === false || outgoing?.llm === false
+  );
+}
+
 /**
  * Wraps the global `fetch` once, inert until `activateLlmFetchObserver`.
  *
@@ -69,7 +83,8 @@ let active: LlmObserverConfig | undefined;
  * starts: a client that captures `fetch` when it is constructed - the
  * official OpenAI and Anthropic SDKs do - and is constructed before Nest
  * instantiates the agent would otherwise keep the unwrapped one. Calls to
- * any other host go straight to the original.
+ * any other host go straight to the original. An application that turns
+ * model calls off gets the original back - see `uninstallLlmFetchObserver`.
  */
 export function installLlmFetchObserver(): void {
   const original = globalThis.fetch as
@@ -110,6 +125,23 @@ export function installLlmFetchObserver(): void {
   };
   Object.defineProperty(observed, INSTALLED, { value: true });
   globalThis.fetch = observed;
+  installed = { wrapper: observed, original };
+}
+
+/**
+ * Puts the original `fetch` back, for an application that turned model calls
+ * off: with them off, nothing of this should sit in its calls' path.
+ *
+ * Only while the wrapper is still the global one. Something that wrapped
+ * `fetch` again on top of it would be unwrapped too, so in that case the
+ * wrapper stays where it is, inert - a straight pass-through.
+ */
+export function uninstallLlmFetchObserver(): void {
+  active = undefined;
+  if (installed && globalThis.fetch === installed.wrapper) {
+    globalThis.fetch = installed.original;
+    installed = undefined;
+  }
 }
 
 /** Starts reading model calls; the returned function stops it again. */

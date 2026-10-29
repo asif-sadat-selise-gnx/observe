@@ -695,7 +695,9 @@ export interface ObserveOptions {
          * response reports, read as the response passes through to the
          * caller. Prompts and completions are never read into the report.
          * Needs `http`; calls made through `node:http` (axios) keep their
-         * plain span.
+         * plain span. Off, the global `fetch` is left as it was: `forRoot`
+         * puts the original back, and `forRootAsync` does when the agent
+         * starts.
          * @default true
          */
         llm?: boolean | OutgoingLlmOptions;

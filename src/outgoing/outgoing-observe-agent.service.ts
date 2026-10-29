@@ -13,7 +13,11 @@ import {
   loadOptionalPeer,
 } from "../utils/optional-peer.util.js";
 import { subscribeOutgoingHttp } from "./http.integration.js";
-import { activateLlmFetchObserver } from "./llm/llm-fetch.integration.js";
+import {
+  activateLlmFetchObserver,
+  llmCallsOff,
+  uninstallLlmFetchObserver,
+} from "./llm/llm-fetch.integration.js";
 import { patchMongodb } from "./mongodb.integration.js";
 import { patchMssql } from "./mssql.integration.js";
 import { patchMysql2 } from "./mysql2.integration.js";
@@ -99,6 +103,11 @@ export class OutgoingObserveAgentService implements OnApplicationShutdown {
     asyncLocalStorage: AsyncLocalStorage<Map<any, any>>,
   ) {
     const outgoing = this.options.outgoing;
+    // `forRoot` has given `fetch` back already; `forRootAsync` options are
+    // only known from here.
+    if (llmCallsOff(outgoing)) {
+      uninstallLlmFetchObserver();
+    }
     if (outgoing === false) {
       return;
     }
