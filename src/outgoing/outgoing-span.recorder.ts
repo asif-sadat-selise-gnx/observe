@@ -7,9 +7,25 @@ import { OperationTraceRegistry } from "../services/operation-trace.registry.js"
 
 type Tags = Record<string, string | number | boolean>;
 
+/**
+ * How long a held span may stay open after its call ended, waiting for what
+ * is reading its response. Well under the second the registry waits for open
+ * spans before it ships an operation without them.
+ */
+const HOLD_GRACE_MS = 250;
+
 /** A span that has been opened and is waiting to be told how the call went. */
 export interface OpenOutgoingSpan {
   end(error?: unknown): void;
+  /** Adds tags to the span - what the response said, once it has been read. */
+  tag?(tags: Tags): void;
+  /**
+   * Keeps the span from closing at `end` until the returned function runs,
+   * so tags read from the response can still reach it. The span keeps the
+   * duration it had at `end`, and closes on its own `HOLD_GRACE_MS` later if
+   * the hold is never released.
+   */
+  hold?(): () => void;
 }
 
 /**
@@ -73,25 +89,74 @@ export class OutgoingSpanRecorder {
     if (node) {
       node.tags = { ...node.tags, ...tags };
     }
+    const startTime = node?.startTime;
 
     let ended = false;
+    let holds = 0;
+    let deferred: { at: number; error?: unknown } | undefined;
+    let grace: NodeJS.Timeout | undefined;
+    const close = (error?: unknown, endedAt?: number) => {
+      // A driver may report one call twice - a callback and an `error`
+      // event, a settled promise and a late listener. The registry counts
+      // closes against opens, so the second would unbalance the snapshot.
+      if (ended) {
+        return;
+      }
+      ended = true;
+      clearTimeout(grace);
+      this.operationTraceRegistry.internalEndTraceStep(
+        registryKey,
+        spanId,
+        className,
+        methodKey,
+        spanId,
+        error === undefined || error === null ? undefined : (error as Error),
+      );
+      // A held span closes late; the call itself ended at `endedAt`.
+      if (node && endedAt !== undefined && startTime !== undefined) {
+        (node as unknown as { duration: number }).duration = Math.max(
+          endedAt - startTime,
+          0,
+        );
+      }
+    };
     return {
       end: (error?: unknown) => {
-        // A driver may report one call twice - a callback and an `error`
-        // event, a settled promise and a late listener. The registry counts
-        // closes against opens, so the second would unbalance the snapshot.
-        if (ended) {
+        if (ended || deferred) {
           return;
         }
-        ended = true;
-        this.operationTraceRegistry.internalEndTraceStep(
-          registryKey,
-          spanId,
-          className,
-          methodKey,
-          spanId,
-          error === undefined || error === null ? undefined : (error as Error),
+        if (holds === 0) {
+          close(error);
+          return;
+        }
+        deferred = { at: performance.now(), error };
+        grace = setTimeout(
+          () => close(deferred?.error, deferred?.at),
+          HOLD_GRACE_MS,
         );
+        grace.unref?.();
+      },
+      tag: (extra: Tags) => {
+        if (node) {
+          node.tags = { ...node.tags, ...extra };
+        }
+      },
+      hold: () => {
+        if (ended) {
+          return () => undefined;
+        }
+        holds += 1;
+        let released = false;
+        return () => {
+          if (released) {
+            return;
+          }
+          released = true;
+          holds -= 1;
+          if (holds === 0 && deferred) {
+            close(deferred.error, deferred.at);
+          }
+        };
       },
     };
   }

@@ -1,4 +1,5 @@
 import type { OutgoingHttpOptions } from "../outgoing/http.integration.js";
+import type { OutgoingLlmOptions } from "../outgoing/llm/llm-fetch.integration.js";
 import type { HttpCaptureOptions } from "../utils/capture-request.util.js";
 import {
   FactoryProvider,
@@ -690,6 +691,18 @@ export interface ObserveOptions {
         database?: boolean;
         /** @default true */
         http?: boolean | OutgoingHttpOptions;
+        /**
+         * Model calls: for a `fetch` to a model provider (OpenAI, Anthropic,
+         * Gemini, Bedrock, Mistral and others), the model and the tokens its
+         * response reports, read as the response passes through to the
+         * caller. Prompts and completions are never read into the report.
+         * Needs `http`; calls made through `node:http` (axios) keep their
+         * plain span. Off, the global `fetch` is left as it was: `forRoot`
+         * puts the original back, and `forRootAsync` does when the agent
+         * starts.
+         * @default true
+         */
+        llm?: boolean | OutgoingLlmOptions;
       };
   /**
    * WebSocket gateway configuration options for the Observe APM.

@@ -13,6 +13,11 @@ import {
   loadOptionalPeer,
 } from "../utils/optional-peer.util.js";
 import { subscribeOutgoingHttp } from "./http.integration.js";
+import {
+  activateLlmFetchObserver,
+  llmCallsOff,
+  uninstallLlmFetchObserver,
+} from "./llm/llm-fetch.integration.js";
 import { patchMongodb } from "./mongodb.integration.js";
 import { patchMssql } from "./mssql.integration.js";
 import { patchMysql2 } from "./mysql2.integration.js";
@@ -89,6 +94,7 @@ const DRIVER_DEPENDENTS = {
 export class OutgoingObserveAgentService implements OnApplicationShutdown {
   private readonly logger = new Logger(OutgoingObserveAgentService.name);
   private unsubscribeHttp?: () => void;
+  private deactivateLlm?: () => void;
 
   constructor(
     @Inject(OBSERVE_OPTIONS)
@@ -97,6 +103,11 @@ export class OutgoingObserveAgentService implements OnApplicationShutdown {
     asyncLocalStorage: AsyncLocalStorage<Map<any, any>>,
   ) {
     const outgoing = this.options.outgoing;
+    // `forRoot` has given `fetch` back already; `forRootAsync` options are
+    // only known from here.
+    if (llmCallsOff(outgoing)) {
+      uninstallLlmFetchObserver();
+    }
     if (outgoing === false) {
       return;
     }
@@ -136,10 +147,18 @@ export class OutgoingObserveAgentService implements OnApplicationShutdown {
         typeof outgoing?.http === "object" ? outgoing.http : {},
         () => operationTraceRegistry.getRedactor(),
       );
+      // Model calls are read off the spans above, so they go with them.
+      if (outgoing?.llm !== false) {
+        this.deactivateLlm = activateLlmFetchObserver(
+          recorder,
+          typeof outgoing?.llm === "object" ? outgoing.llm : {},
+        );
+      }
     }
   }
 
   onApplicationShutdown() {
+    this.deactivateLlm?.();
     this.unsubscribeHttp?.();
   }
 
